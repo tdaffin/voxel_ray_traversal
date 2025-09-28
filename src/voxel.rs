@@ -17,18 +17,19 @@ pub fn build_voxel_descriptor_set(
     image_views: &[Arc<ImageView>],
 ) -> Arc<DescriptorSet> {
     assert!(!image_views.is_empty(), "Need at least one voxel image view");
+    const MAX_GRIDS: usize = 32; // keep in sync with shader
     let layout = render_pipeline.layout().set_layouts()[1].clone();
-    let writes: Vec<WriteDescriptorSet> = image_views
-        .iter()
-        .enumerate()
-        .map(|(i, view)| WriteDescriptorSet::image_view(i as u32, view.clone()))
-        .collect();
+    // Pad to MAX_GRIDS by repeating the first view. Shader only indexes [0, voxel_count),
+    // so extra descriptors are never accessed; this avoids needing descriptor indexing features.
+    let mut padded: Vec<Arc<ImageView>> = image_views.to_vec();
+    while padded.len() < MAX_GRIDS { padded.push(padded[0].clone()); }
+    let writes = [WriteDescriptorSet::image_view_array(0, 0, padded.iter().cloned())];
     DescriptorSet::new(
         descriptor_set_allocator,
         layout,
         writes,
         [],
-    ).expect("Failed to create voxel descriptor set")
+    ).expect("Failed to create voxel descriptor set (array)")
 }
 
 /// Create a single 3D voxel image view and upload the provided packed voxel data.

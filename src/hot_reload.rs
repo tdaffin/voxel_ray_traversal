@@ -59,12 +59,14 @@ fn get_pipeline(shader_module: Arc<ShaderModule>) -> Arc<ComputePipeline> {
     )
     .unwrap();
 
-    ComputePipeline::new(
+    let cp = ComputePipeline::new(
         device.clone(),
         None,
         ComputePipelineCreateInfo::stage_layout(stage, layout),
     )
     .unwrap()
+    ;
+    cp
 }
 
 pub struct HotReloadComputePipeline {

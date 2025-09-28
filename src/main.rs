@@ -305,6 +305,7 @@ struct App {
     voxel_resolution: u32,
     future_voxel_resolution: u32,
     model: Model,
+    active_voxel_grids: u32,
 
     camera: Camera,
     render_mode: RenderMode,
@@ -445,6 +446,7 @@ impl App {
             );
             build_voxel_descriptor_set(descriptor_set_allocator.clone(), &render_pipeline, &image_views)
         };
+        let active_voxel_grids = Model::ALL.len() as u32;
 
         let input = WinitInputHelper::new();
 
@@ -478,6 +480,7 @@ impl App {
             voxel_resolution,
             future_voxel_resolution: voxel_resolution,
             model,
+            active_voxel_grids,
             camera,
             render_mode: RenderMode::Coord,
             render_scale: 1.0,
@@ -609,6 +612,7 @@ impl App {
                     }
                 });
                 ui.separator();
+                ui.add(egui::Slider::new(&mut self.active_voxel_grids, 1..=Model::ALL.len() as u32).text("Active Grids"));
                 if ui.button("Benchmark Traversal Variants").clicked() {
                     trigger_benchmark = true;
                 }
@@ -740,8 +744,9 @@ impl App {
                     let pixel_to_ray = scale_and_center * pixel_to_ray;
                     #[derive(BufferContents)]
                     #[repr(C)]
-                    struct PushConstants { pixel_to_ray: Matrix4<f32>, voxel_resolution: u32, render_mode: u32 }
-                    let push_constants = PushConstants { pixel_to_ray: pixel_to_ray.cast(), voxel_resolution: self.voxel_resolution, render_mode: self.render_mode as u32 };
+                    struct PushConstants { pixel_to_ray: Matrix4<f32>, voxel_resolution: u32, render_mode: u32, voxel_count: u32 }
+                    let voxel_count = self.active_voxel_grids.min(Model::ALL.len() as u32);
+                    let push_constants = PushConstants { pixel_to_ray: pixel_to_ray.cast(), voxel_resolution: self.voxel_resolution, render_mode: self.render_mode as u32, voxel_count };
                     let mut builder = AutoCommandBufferBuilder::primary(
                         self.command_buffer_allocator.clone(),
                         self.queue.queue_family_index(),
@@ -806,11 +811,13 @@ impl App {
             pixel_to_ray: Matrix4<f32>,
             voxel_resolution: u32,
             render_mode: u32,
+            voxel_count: u32,
         }
         let push_constants = PushConstants {
             pixel_to_ray: pixel_to_ray.cast(),
             voxel_resolution: self.voxel_resolution,
             render_mode: self.render_mode as u32,
+            voxel_count: self.active_voxel_grids.min(Model::ALL.len() as u32),
         };
 
         let mut builder = AutoCommandBufferBuilder::primary(
