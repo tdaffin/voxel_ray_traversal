@@ -378,7 +378,7 @@ struct App {
     resample_pipeline: HotReloadComputePipeline,
     render_pipeline_branchless: HotReloadComputePipeline,
 
-    voxel_set: Arc<DescriptorSet>,
+    voxel_set: Arc<DescriptorSet>, // now holds 3 voxel grids
     voxel_resolution: u32,
     future_voxel_resolution: u32,
     model: Model,
@@ -508,18 +508,53 @@ impl App {
 
         let voxel_resolution = INITIAL_VOXEL_RESOLUTION;
         let model = Model::Bunny;
+        // Generate all three voxel grids (Bunny, Dragon, Armadillo) side-by-side.
         let voxel_set = {
-            let voxels = voxelize::ply_to_voxels(model.path(), voxel_resolution);
+            let mut image_views = Vec::new();
+            for m in Model::ALL.iter() {
+                let voxels = voxelize::ply_to_voxels(m.path(), voxel_resolution);
+                let image = Image::new(
+                    memory_allocator.clone(),
+                    ImageCreateInfo {
+                        image_type: ImageType::Dim3d,
+                        format: Format::R32G32B32A32_UINT,
+                        extent: [voxel_resolution / 4, voxel_resolution / 4, voxel_resolution / 8],
+                        usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_DST,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo::default(),
+                ).unwrap();
 
-            get_voxel_set(
-                memory_allocator.clone(),
-                command_buffer_allocator.clone(),
+                let src_buffer = Buffer::from_iter(
+                    memory_allocator.clone(),
+                    BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
+                    AllocationCreateInfo { memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE, ..Default::default() },
+                    voxels,
+                ).unwrap();
+
+                let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
+                    command_buffer_allocator.clone(),
+                    queue.queue_family_index(),
+                    CommandBufferUsage::OneTimeSubmit,
+                ).unwrap();
+                command_buffer_builder
+                    .clear_color_image(ClearColorImageInfo::image(image.clone())).unwrap()
+                    .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(src_buffer, image.clone())).unwrap();
+                let _ = command_buffer_builder.build().unwrap().execute(queue.clone()).unwrap();
+                let image_view = ImageView::new(image.clone(), ImageViewCreateInfo::from_image(&image)).unwrap();
+                image_views.push(image_view);
+            }
+            let layout = render_pipeline.layout().set_layouts()[1].clone();
+            DescriptorSet::new(
                 descriptor_set_allocator.clone(),
-                &render_pipeline,
-                &queue,
-                voxels,
-                voxel_resolution,
-            )
+                layout,
+                [
+                    WriteDescriptorSet::image_view(0, image_views[0].clone()),
+                    WriteDescriptorSet::image_view(1, image_views[1].clone()),
+                    WriteDescriptorSet::image_view(2, image_views[2].clone()),
+                ],
+                [],
+            ).unwrap()
         };
 
         let input = WinitInputHelper::new();
@@ -746,16 +781,50 @@ impl App {
                 });
                 if ui.button("Generate Voxel Grid").clicked() {
                     self.voxel_resolution = self.future_voxel_resolution;
-                    let voxels = voxelize::ply_to_voxels(self.model.path(), self.voxel_resolution);
-                    self.voxel_set = get_voxel_set(
-                        self.memory_allocator.clone(),
-                        self.command_buffer_allocator.clone(),
+                    // Regenerate all three voxel grids at new resolution.
+                    let mut image_views = Vec::new();
+                    for m in Model::ALL.iter() {
+                        let voxels = voxelize::ply_to_voxels(m.path(), self.voxel_resolution);
+                        let image = Image::new(
+                            self.memory_allocator.clone(),
+                            ImageCreateInfo {
+                                image_type: ImageType::Dim3d,
+                                format: Format::R32G32B32A32_UINT,
+                                extent: [self.voxel_resolution / 4, self.voxel_resolution / 4, self.voxel_resolution / 8],
+                                usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_DST,
+                                ..Default::default()
+                            },
+                            AllocationCreateInfo::default(),
+                        ).unwrap();
+                        let src_buffer = Buffer::from_iter(
+                            self.memory_allocator.clone(),
+                            BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
+                            AllocationCreateInfo { memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE, ..Default::default() },
+                            voxels,
+                        ).unwrap();
+                        let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
+                            self.command_buffer_allocator.clone(),
+                            self.queue.queue_family_index(),
+                            CommandBufferUsage::OneTimeSubmit,
+                        ).unwrap();
+                        command_buffer_builder
+                            .clear_color_image(ClearColorImageInfo::image(image.clone())).unwrap()
+                            .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(src_buffer, image.clone())).unwrap();
+                        let _ = command_buffer_builder.build().unwrap().execute(self.queue.clone()).unwrap();
+                        let image_view = ImageView::new(image.clone(), ImageViewCreateInfo::from_image(&image)).unwrap();
+                        image_views.push(image_view);
+                    }
+                    let layout = self.render_pipeline.layout().set_layouts()[1].clone();
+                    self.voxel_set = DescriptorSet::new(
                         self.descriptor_set_allocator.clone(),
-                        &self.render_pipeline,
-                        &self.queue,
-                        voxels,
-                        self.voxel_resolution,
-                    );
+                        layout,
+                        [
+                            WriteDescriptorSet::image_view(0, image_views[0].clone()),
+                            WriteDescriptorSet::image_view(1, image_views[1].clone()),
+                            WriteDescriptorSet::image_view(2, image_views[2].clone()),
+                        ],
+                        [],
+                    ).unwrap();
                 }
             });
             egui::Window::new("Stats").show(&ctx, |ui| {
