@@ -276,80 +276,23 @@ fn get_images_and_sets(
     (render_image, render_set, resample_image, resample_set)
 }
 
+/// Utility to build the voxel descriptor set (set=1) from provided image views.
+/// Expects image_views.len() == 3 matching the shader bindings 0,1,2.
 fn get_voxel_set(
-    memory_allocator: Arc<StandardMemoryAllocator>,
-    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     render_pipeline: &ComputePipeline,
-    queue: &Arc<Queue>,
-    voxels: Vec<u128>,
-    resolution: u32,
+    image_views: &[Arc<ImageView>],
 ) -> Arc<DescriptorSet> {
-    // Each texel is a 4x4x8 block of
-    // voxels where each bit is one voxel.
-    let image = Image::new(
-        memory_allocator.clone(),
-        ImageCreateInfo {
-            image_type: ImageType::Dim3d,
-            format: Format::R32G32B32A32_UINT,
-            extent: [resolution / 4, resolution / 4, resolution / 8],
-            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_DST,
-            ..Default::default()
-        },
-        AllocationCreateInfo::default(),
-    )
-    .unwrap();
-
-    let src_buffer = Buffer::from_iter(
-        memory_allocator.clone(),
-        BufferCreateInfo {
-            usage: BufferUsage::TRANSFER_SRC,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-            ..Default::default()
-        },
-        voxels,
-    )
-    .unwrap();
-
-    let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
-        command_buffer_allocator.clone(),
-        queue.queue_family_index(),
-        CommandBufferUsage::OneTimeSubmit,
-    )
-    .unwrap();
-
-    command_buffer_builder
-        .clear_color_image(ClearColorImageInfo::image(image.clone()))
-        .unwrap()
-        .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
-            src_buffer,
-            image.clone(),
-        ))
-        .unwrap();
-
-    let _ = command_buffer_builder
-        .build()
-        .unwrap()
-        .execute(queue.clone())
-        .unwrap();
-
-    let image_view =
-        ImageView::new(image.clone(), ImageViewCreateInfo::from_image(&image)).unwrap();
-
-    let layout = render_pipeline
-        .layout()
-        .set_layouts()
-        .get(1)
-        .unwrap()
-        .clone();
+    debug_assert_eq!(image_views.len(), 3, "Expected exactly three voxel image views");
+    let layout = render_pipeline.layout().set_layouts()[1].clone();
     DescriptorSet::new(
-        descriptor_set_allocator.clone(),
-        layout.clone(),
-        [WriteDescriptorSet::image_view(0, image_view)],
+        descriptor_set_allocator,
+        layout,
+        [
+            WriteDescriptorSet::image_view(0, image_views[0].clone()),
+            WriteDescriptorSet::image_view(1, image_views[1].clone()),
+            WriteDescriptorSet::image_view(2, image_views[2].clone()),
+        ],
         [],
     )
     .unwrap()
@@ -547,17 +490,7 @@ impl App {
                 let image_view = ImageView::new(image.clone(), ImageViewCreateInfo::from_image(&image)).unwrap();
                 image_views.push(image_view);
             }
-            let layout = render_pipeline.layout().set_layouts()[1].clone();
-            DescriptorSet::new(
-                descriptor_set_allocator.clone(),
-                layout,
-                [
-                    WriteDescriptorSet::image_view(0, image_views[0].clone()),
-                    WriteDescriptorSet::image_view(1, image_views[1].clone()),
-                    WriteDescriptorSet::image_view(2, image_views[2].clone()),
-                ],
-                [],
-            ).unwrap()
+            get_voxel_set(descriptor_set_allocator.clone(), &render_pipeline, &image_views)
         };
 
         let input = WinitInputHelper::new();
@@ -832,17 +765,7 @@ impl App {
                         let image_view = ImageView::new(image.clone(), ImageViewCreateInfo::from_image(&image)).unwrap();
                         image_views.push(image_view);
                     }
-                    let layout = self.render_pipeline.layout().set_layouts()[1].clone();
-                    self.voxel_set = DescriptorSet::new(
-                        self.descriptor_set_allocator.clone(),
-                        layout,
-                        [
-                            WriteDescriptorSet::image_view(0, image_views[0].clone()),
-                            WriteDescriptorSet::image_view(1, image_views[1].clone()),
-                            WriteDescriptorSet::image_view(2, image_views[2].clone()),
-                        ],
-                        [],
-                    ).unwrap();
+                    self.voxel_set = get_voxel_set(self.descriptor_set_allocator.clone(), &self.render_pipeline, &image_views);
                 }
             });
             egui::Window::new("Stats").show(&ctx, |ui| {
