@@ -508,11 +508,14 @@ impl App {
 
         let voxel_resolution = INITIAL_VOXEL_RESOLUTION;
         let model = Model::Bunny;
-        // Generate all three voxel grids (Bunny, Dragon, Armadillo) side-by-side.
+        // Generate all three voxel grids (Bunny, Dragon, Armadillo) side-by-side (voxelization parallelized).
         let voxel_set = {
+            use rayon::prelude::*;
+            let all_voxels: Vec<Vec<u128>> = Model::ALL.par_iter()
+                .map(|m| voxelize::ply_to_voxels(m.path(), voxel_resolution))
+                .collect();
             let mut image_views = Vec::new();
-            for m in Model::ALL.iter() {
-                let voxels = voxelize::ply_to_voxels(m.path(), voxel_resolution);
+            for voxels in all_voxels.into_iter() {
                 let image = Image::new(
                     memory_allocator.clone(),
                     ImageCreateInfo {
@@ -782,9 +785,12 @@ impl App {
                 if ui.button("Generate Voxel Grid").clicked() {
                     self.voxel_resolution = self.future_voxel_resolution;
                     // Regenerate all three voxel grids at new resolution.
+                    use rayon::prelude::*;
+                    let all_voxels: Vec<Vec<u128>> = Model::ALL.par_iter()
+                        .map(|m| voxelize::ply_to_voxels(m.path(), self.voxel_resolution))
+                        .collect();
                     let mut image_views = Vec::new();
-                    for m in Model::ALL.iter() {
-                        let voxels = voxelize::ply_to_voxels(m.path(), self.voxel_resolution);
+                    for voxels in all_voxels.into_iter() {
                         let image = Image::new(
                             self.memory_allocator.clone(),
                             ImageCreateInfo {
@@ -874,8 +880,14 @@ impl App {
             let branching_pipe: Arc<ComputePipeline> = self.render_pipeline.clone();
             let branchless_pipe: Arc<ComputePipeline> = self.render_pipeline_branchless.clone();
             let mut run_variant = |pipe: Arc<ComputePipeline>| {
-                let mut total = Duration::ZERO;
-                for _ in 0..frames {
+                let mut total_cpu = Duration::ZERO;
+                let mut total_gpu_ns_accum: f64 = 0.0;
+                use vulkano::query::{QueryPool, QueryPoolCreateInfo, QueryType, QueryResultFlags};
+                use vulkano::sync::PipelineStage;
+                let timestamp_period = self.device.physical_device().properties().timestamp_period; // nanoseconds per tick (f32)
+                let supports_timestamps = self.device.physical_device().queue_family_properties()[self.queue.queue_family_index() as usize].timestamp_valid_bits.is_some();
+                let query_pool = if supports_timestamps { Some(QueryPool::new(self.device.clone(), QueryPoolCreateInfo { query_count: frames * 2, ..QueryPoolCreateInfo::query_type(QueryType::Timestamp) }).unwrap()) } else { None };
+                for f in 0..frames {
                     let rcx = self.rcx.as_mut().unwrap();
                     let (image_index, suboptimal, acquire_future) = match acquire_next_image(rcx.swapchain.clone(), None).map_err(Validated::unwrap) { Ok(r)=>r, Err(_)=>break};
                     if suboptimal { rcx.recreate_swapchain = true; }
@@ -895,10 +907,12 @@ impl App {
                         CommandBufferUsage::OneTimeSubmit,
                     ).unwrap();
                     builder.clear_color_image(ClearColorImageInfo::image(rcx.render_image.clone())).unwrap();
+                    if let Some(qp) = &query_pool { unsafe { builder.write_timestamp(qp.clone(), f*2, PipelineStage::TopOfPipe).unwrap(); } }
                     builder.bind_pipeline_compute(pipe.clone()).unwrap()
                         .push_constants(pipe.layout().clone(), 0, push_constants).unwrap()
                         .bind_descriptor_sets(PipelineBindPoint::Compute, pipe.layout().clone(), 0, vec![rcx.render_set.clone(), self.voxel_set.clone()]).unwrap();
                     unsafe { builder.dispatch([render_extent[0].div_ceil(8), render_extent[1].div_ceil(8), 1]).unwrap(); }
+                    if let Some(qp) = &query_pool { unsafe { builder.write_timestamp(qp.clone(), f*2+1, PipelineStage::BottomOfPipe).unwrap(); } }
                     let mut info = BlitImageInfo::images(
                         rcx.render_image.clone(),
                         rcx.image_views[image_index as usize].image().clone(),
@@ -911,15 +925,24 @@ impl App {
                         .then_swapchain_present(self.queue.clone(), SwapchainPresentInfo::swapchain_image_index(rcx.swapchain.clone(), image_index))
                         .then_signal_fence_and_flush().unwrap();
                     future.wait(None).unwrap();
-                    total += start.elapsed();
+                    total_cpu += start.elapsed();
                 }
-                total / frames
+                // Fetch GPU timestamps if available
+                let avg_gpu_ns_opt = if let Some(qp) = &query_pool { if supports_timestamps {
+                    let mut data: Vec<u64> = vec![0; (frames*2) as usize];
+                    qp.get_results(0..frames*2, &mut data, QueryResultFlags::WAIT).unwrap();
+                    for f in 0..frames { let start = data[(f*2) as usize]; let end = data[(f*2+1) as usize]; if end>start { let ticks = (end - start) as f64; total_gpu_ns_accum += ticks * timestamp_period as f64; } }
+                    if total_gpu_ns_accum > 0.0 { Some((total_gpu_ns_accum / frames as f64) as u128) } else { None }
+                } else { None } } else { None };
+                (total_cpu / frames, avg_gpu_ns_opt)
             };
-            let branching = run_variant(branching_pipe);
-            let branchless = run_variant(branchless_pipe);
+            let (branching_cpu, branching_gpu) = run_variant(branching_pipe);
+            let (branchless_cpu, branchless_gpu) = run_variant(branchless_pipe);
             println!("Benchmark Results ({} frames each):", frames);
-            println!("  Branching traversal avg frame: {:?}", branching);
-            println!("  Branchless traversal avg frame: {:?}", branchless);
+            println!("  Branching traversal avg frame CPU: {:?}", branching_cpu);
+            if let Some(ns)=branching_gpu { println!("  Branching traversal avg frame GPU: {:.3} ms", ns as f64 / 1_000_000.0); }
+            println!("  Branchless traversal avg frame CPU: {:?}", branchless_cpu);
+            if let Some(ns)=branchless_gpu { println!("  Branchless traversal avg frame GPU: {:.3} ms", ns as f64 / 1_000_000.0); }
         }
 
     // Re-borrow render context for the remainder of the standard render path.
