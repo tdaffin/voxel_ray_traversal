@@ -93,23 +93,4 @@ pub fn create_empty_voxel_placeholder(
     )
 }
 
-/// Batch-create voxel image views from multiple packed voxel arrays in parallel voxelization context.
-pub fn create_voxel_image_views(
-    memory_allocator: Arc<StandardMemoryAllocator>,
-    command_buffer_allocator: Arc<vulkano::command_buffer::allocator::StandardCommandBufferAllocator>,
-    queue: Arc<Queue>,
-    all_voxels: Vec<Vec<u128>>,
-    resolution: u32,
-) -> Vec<Arc<ImageView>> {
-    let mut views = Vec::with_capacity(all_voxels.len());
-    for voxels in all_voxels.into_iter() {
-        views.push(create_voxel_image_view(
-            memory_allocator.clone(),
-            command_buffer_allocator.clone(),
-            queue.clone(),
-            voxels,
-            resolution,
-        ));
-    }
-    views
-}
+// (bulk creation helper removed as voxelization is now asynchronous per model)

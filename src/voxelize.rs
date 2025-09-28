@@ -1,11 +1,11 @@
 use bytemuck::NoUninit;
-use crossterm::{cursor, ExecutableCommand, QueueableCommand};
+// Removed terminal progress dependency (crossterm) since we use callback-based progress.
 use nalgebra::{Vector2, Vector3, Vector4};
 use ply_rs::{
     parser::Parser,
     ply::{Property, PropertyAccess},
 };
-use std::io::Write;
+use std::sync::{atomic::{AtomicBool, Ordering}};
 use std::path::Path;
 
 type Vec2 = Vector2<f32>;
@@ -14,18 +14,28 @@ type Vec4 = Vector4<f32>;
 
 type UVec3 = Vector3<usize>;
 
-pub fn ply_to_voxels(path: impl AsRef<Path>, resolution: u32) -> Vec<u128> {
-    print!("Voxelizing... ");
+pub struct VoxelProgressCallbacks<'a> {
+    pub cancelled: &'a AtomicBool,
+    pub progress: Option<Box<dyn Fn(usize, usize) + Send + 'a>>, // (done,total)
+}
 
-    let start = std::time::Instant::now();
-
+pub fn ply_to_voxels_with_progress(
+    path: impl AsRef<Path>,
+    resolution: u32,
+    cb: VoxelProgressCallbacks,
+) -> Option<Vec<u128>> {
     let mut mesh = parse_ply(path);
+    if cb.cancelled.load(Ordering::Relaxed) { return None; }
     transform_vertices(&mut mesh.vertices, resolution);
-    let voxels = voxelize_mesh(&mesh, resolution);
+    if cb.cancelled.load(Ordering::Relaxed) { return None; }
+    let voxels = voxelize_mesh_progress(&mesh, resolution, &cb);
+    if cb.cancelled.load(Ordering::Relaxed) { return None; }
+    Some(voxels)
+}
 
-    println!(" ({:?})", start.elapsed());
-
-    voxels
+pub fn ply_to_voxels(path: impl AsRef<Path>, resolution: u32) -> Vec<u128> {
+    ply_to_voxels_with_progress(path, resolution, VoxelProgressCallbacks { cancelled: &AtomicBool::new(false), progress: None })
+        .unwrap_or_default()
 }
 
 fn parse_ply(path: impl AsRef<Path>) -> Mesh {
@@ -128,30 +138,33 @@ fn transform_vertices(vertices: &mut [Vec3], resolution: u32) {
 
 // Each u128 is an rgba32ui on the GPU in a 3D texture.
 // Each texel is 4x4x8 voxels, and each channel is 1x4x8 voxels.
-fn voxelize_mesh(mesh: &Mesh, resolution: u32) -> Vec<u128> {
+
+fn voxelize_mesh_progress(
+    mesh: &Mesh,
+    resolution: u32,
+    cb: &VoxelProgressCallbacks,
+) -> Vec<u128> {
     let resolution = resolution as usize;
     let mut voxels = vec![0u128; resolution * resolution * resolution / 128];
-
-    let mut bar = Progress::begin(mesh.triangles.len());
-
+    let total = mesh.triangles.len();
+    let mut processed = 0usize;
     for triangle in &mesh.triangles {
-        bar.update();
-
+        if cb.cancelled.load(Ordering::Relaxed) { break; }
         let a = &mesh.vertices[triangle[0] as usize];
         let b = &mesh.vertices[triangle[1] as usize];
         let c = &mesh.vertices[triangle[2] as usize];
         let helper = Helper::new(a, b, c);
-
         helper.visit_intersecting_voxels(|x, y, z| {
-            // Convert to texel index + bit index in packed format
             let texel = (x + ((y + (z / 8) * resolution) / 4) * resolution) / 4;
             let bit = (x % 4) * 32 + (y % 4) + (z % 8) * 4;
             voxels[texel] |= 1 << bit;
         });
+        processed += 1;
+        if processed % 256 == 0 { // throttle callbacks
+            if let Some(p) = &cb.progress { p(processed, total); }
+        }
     }
-
-    bar.end();
-
+    if let Some(p) = &cb.progress { p(processed, total); }
     voxels
 }
 
@@ -266,35 +279,4 @@ struct Mesh {
     triangles: Vec<[i32; 3]>,
 }
 
-struct Progress {
-    length: usize,
-    index: usize,
-}
-
-impl Progress {
-    fn begin(length: usize) -> Self {
-        let mut stdout = std::io::stdout();
-        stdout.queue(cursor::Hide).unwrap();
-        stdout.queue(cursor::SavePosition).unwrap();
-        stdout.write_all("0%".as_bytes()).unwrap();
-        stdout.flush().unwrap();
-        Self { length, index: 0 }
-    }
-
-    fn update(&mut self) {
-        let a = 100 * self.index / (self.length - 1);
-        self.index += 1;
-        let b = 100 * self.index / (self.length - 1);
-        if b != a {
-            let mut stdout = std::io::stdout();
-            stdout.queue(cursor::RestorePosition).unwrap();
-            stdout.write_all(format!("{}%", b).as_bytes()).unwrap();
-            stdout.flush().unwrap();
-        }
-    }
-
-    fn end(&mut self) {
-        let mut stdout = std::io::stdout();
-        stdout.execute(cursor::Show).unwrap();
-    }
-}
+// Removed unused legacy terminal progress machinery and blocking voxelizer.
