@@ -562,13 +562,25 @@ impl App {
 
         let input = WinitInputHelper::new();
 
+        // Adjust default camera to frame the three side-by-side voxel grids.
+        // Grids are placed along +X with stride (resolution + 0.25*resolution).
+        // Center of the trio is roughly at x = stride (middle grid), y = res/2, z = res/2.
+        let res_f = 1.0f64;//voxel_resolution as f64;
+        let spacing = res_f * 0.25; // matches shader
+        let stride = res_f + spacing;
+        let target = Vector3::new(stride, res_f * 0.5, res_f * 0.5);
+        // Position the camera back and up diagonally so all three fit in view.
+        // Place it at a distance proportional to total width (approx 2*stride + res) and some height.
+        let total_width = 2.0 * stride + res_f; // from start of first to end of third
+        let dist = total_width * 1.2; // back off a bit more than width for margin
+        let cam_pos = target + Vector3::new(-dist, dist * 0.6, dist * 0.8);
         let mut camera = Camera::new(
-            Vector3::new(2.0, 3.0, 1.0),
+            cam_pos,
             Vector3::zeros(),
             INITIAL_WINDOW_RESOLUTION.into(),
-            20.0,
+            35.0, // wider FOV to ensure all three grids are visible
         );
-        camera.look_at(Vector3::zeros());
+        camera.look_at(target);
 
         App {
             instance,
