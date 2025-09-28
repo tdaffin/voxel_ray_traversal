@@ -23,6 +23,7 @@ fn compile_to_spirv(
     path: &Path,
     kind: shaderc::ShaderKind,
     entry_point_name: &str,
+    defines: &[(String, Option<String>)],
 ) -> Result<shaderc::CompilationArtifact, shaderc::Error> {
     let mut f = File::open(path).unwrap();
     let mut source_text = String::new();
@@ -32,6 +33,9 @@ fn compile_to_spirv(
     let mut options = shaderc::CompileOptions::new().unwrap();
     options.set_optimization_level(shaderc::OptimizationLevel::Performance);
     options.add_macro_definition("EP", Some(entry_point_name));
+    for (k, v) in defines {
+        options.add_macro_definition(k, v.as_deref());
+    }
     compiler.compile_into_spirv(
         &source_text,
         kind,
@@ -68,6 +72,7 @@ pub struct HotReloadComputePipeline {
     reload: Arc<AtomicBool>,
     path: PathBuf,
     _watcher: RecommendedWatcher,
+    defines: Vec<(String, Option<String>)>,
 }
 
 impl Deref for HotReloadComputePipeline {
@@ -80,6 +85,14 @@ impl Deref for HotReloadComputePipeline {
 
 impl HotReloadComputePipeline {
     pub fn new(device: Arc<Device>, path: &Path) -> Self {
+        Self::with_defines(device, path, vec![])
+    }
+
+    pub fn with_defines(
+        device: Arc<Device>,
+        path: &Path,
+        defines: Vec<(String, Option<String>)>,
+    ) -> Self {
         let reload = Arc::<AtomicBool>::default();
         let cloned_reload = reload.clone();
         let mut watcher =
@@ -94,7 +107,13 @@ impl HotReloadComputePipeline {
 
         watcher.watch(path, RecursiveMode::NonRecursive).unwrap();
 
-        let artifact = compile_to_spirv(path, shaderc::ShaderKind::Compute, "main").unwrap();
+        let artifact = compile_to_spirv(
+            path,
+            shaderc::ShaderKind::Compute,
+            "main",
+            &defines,
+        )
+        .unwrap();
 
         let shader_module = unsafe {
             ShaderModule::new(device, ShaderModuleCreateInfo::new(artifact.as_binary())).unwrap()
@@ -102,17 +121,17 @@ impl HotReloadComputePipeline {
 
         let pipeline = get_pipeline(shader_module);
 
-        Self {
-            pipeline,
-            reload,
-            path: path.to_path_buf(),
-            _watcher: watcher,
-        }
+        Self { pipeline, reload, path: path.to_path_buf(), _watcher: watcher, defines }
     }
 
     pub fn maybe_reload(&mut self) {
         if self.reload.swap(false, Ordering::Relaxed) {
-            let artifact = match compile_to_spirv(&self.path, shaderc::ShaderKind::Compute, "main")
+            let artifact = match compile_to_spirv(
+                &self.path,
+                shaderc::ShaderKind::Compute,
+                "main",
+                &self.defines,
+            )
             {
                 Ok(artifact) => artifact,
                 Err(e) => {

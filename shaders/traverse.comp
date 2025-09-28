@@ -98,28 +98,39 @@ bool traversal(vec3 origin, vec3 dir, out vec3 color, inout uint steps) {
     if (!instantHit)
     while (true) {
         steps++;
-
-        if (t.x < t.y) {
-            if (t.x < t.z) {
-                coord.x += ustep.x;
-                t.x += delta.x;
-                stepped_axis = 0;
+        #ifndef BRANCHLESS_TRAVERSAL
+            if (t.x < t.y) {
+                if (t.x < t.z) {
+                    coord.x += ustep.x;
+                    t.x += delta.x;
+                    stepped_axis = 0;
+                } else {
+                    coord.z += ustep.z;
+                    t.z += delta.z;
+                    stepped_axis = 2;
+                }
             } else {
-                coord.z += ustep.z;
-                t.z += delta.z;
-                stepped_axis = 2;
+                if (t.y < t.z) {
+                    coord.y += ustep.y;
+                    t.y += delta.y;
+                    stepped_axis = 1;
+                } else {
+                    coord.z += ustep.z;
+                    t.z += delta.z;
+                    stepped_axis = 2;
+                }
             }
-        } else {
-            if (t.y < t.z) {
-                coord.y += ustep.y;
-                t.y += delta.y;
-                stepped_axis = 1;
-            } else {
-                coord.z += ustep.z;
-                t.z += delta.z;
-                stepped_axis = 2;
-            }
-        }
+        #else
+            // Branchless variant: compute mask selecting axis to advance.
+            uvec3 mask = uvec3(
+                (t.x < t.y && t.x < t.z) ? 1u : 0u,
+                (t.x >= t.y && t.y < t.z) ? 1u : 0u,
+                (t.x >= t.z && t.y >= t.z) ? 1u : 0u
+            );
+            coord += ustep * mask;
+            t += delta * mask;
+            stepped_axis = (mask.x != 0u) ? 0u : ((mask.y != 0u) ? 1u : 2u);
+        #endif
 
         if (any(greaterThanEqual(coord, uvec3(pc.voxel_resolution))))
         return false;

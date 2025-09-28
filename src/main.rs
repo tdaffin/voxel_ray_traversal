@@ -190,7 +190,8 @@ fn get_render_image(
     let image = Image::new(
         memory_allocator,
         ImageCreateInfo {
-            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_DST,
+            // Added TRANSFER_SRC so we can blit directly from this image in the benchmark path.
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_DST | ImageUsage::TRANSFER_SRC,
             format: Format::R8G8B8A8_UNORM,
             extent: [extent[0], extent[1], 1],
             ..Default::default()
@@ -375,6 +376,7 @@ struct App {
 
     render_pipeline: HotReloadComputePipeline,
     resample_pipeline: HotReloadComputePipeline,
+    render_pipeline_branchless: HotReloadComputePipeline,
 
     voxel_set: Arc<DescriptorSet>,
     voxel_resolution: u32,
@@ -492,8 +494,15 @@ impl App {
             get_allocators(&device);
 
         let shaders_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
-        let render_pipeline =
-            HotReloadComputePipeline::new(device.clone(), &shaders_dir.join("traverse.comp"));
+        let render_pipeline = HotReloadComputePipeline::new(
+            device.clone(),
+            &shaders_dir.join("traverse.comp"),
+        );
+        let render_pipeline_branchless = HotReloadComputePipeline::with_defines(
+            device.clone(),
+            &shaders_dir.join("traverse.comp"),
+            vec![("BRANCHLESS_TRAVERSAL".to_string(), None::<String>)],
+        );
         let resample_pipeline =
             HotReloadComputePipeline::new(device.clone(), &shaders_dir.join("resample.comp"));
 
@@ -533,6 +542,7 @@ impl App {
             command_buffer_allocator,
 
             render_pipeline,
+            render_pipeline_branchless,
             resample_pipeline,
 
             voxel_set,
@@ -613,71 +623,73 @@ impl App {
     fn render(&mut self, _event_loop: &ActiveEventLoop) {
         self.render_pipeline.maybe_reload();
         self.resample_pipeline.maybe_reload();
+        self.render_pipeline_branchless.maybe_reload();
 
-        let rcx = self.rcx.as_mut().unwrap();
+        {
+            let rcx = self.rcx.as_mut().unwrap();
+            if self.input.window_resized().is_some() {
+                rcx.recreate_swapchain = true;
+            }
+            let window_size = rcx.window.inner_size();
 
-        if self.input.window_resized().is_some() {
-            rcx.recreate_swapchain = true;
+            if window_size.width == 0 || window_size.height == 0 {
+                return;
+            }
+
+            if rcx.recreate_swapchain {
+                let images;
+                (rcx.swapchain, images) = rcx
+                    .swapchain
+                    .recreate(SwapchainCreateInfo {
+                        image_extent: window_size.into(),
+                        ..rcx.swapchain.create_info()
+                    })
+                    .unwrap();
+                rcx.image_views = images
+                    .iter()
+                    .map(|i| ImageView::new(i.clone(), ImageViewCreateInfo::from_image(i)).unwrap())
+                    .collect();
+                let window_extent: [u32; 2] = window_size.into();
+                let render_extent = [
+                    (window_extent[0] as f32 * self.render_scale) as u32,
+                    (window_extent[1] as f32 * self.render_scale) as u32,
+                ];
+                (
+                    rcx.render_image,
+                    rcx.render_set,
+                    rcx.resample_image,
+                    rcx.resample_set,
+                ) = get_images_and_sets(
+                    self.memory_allocator.clone(),
+                    self.descriptor_set_allocator.clone(),
+                    &self.render_pipeline,
+                    &self.resample_pipeline,
+                    render_extent,
+                    window_extent,
+                );
+                rcx.recreate_swapchain = false;
+            }
         }
 
-        let window_size = rcx.window.inner_size();
-
-        if window_size.width == 0 || window_size.height == 0 {
-            return;
-        }
-
-        if rcx.recreate_swapchain {
-            let images;
-            (rcx.swapchain, images) = rcx
-                .swapchain
-                .recreate(SwapchainCreateInfo {
-                    image_extent: window_size.into(),
-                    ..rcx.swapchain.create_info()
-                })
-                .unwrap();
-
-            rcx.image_views = images
-                .iter()
-                .map(|i| ImageView::new(i.clone(), ImageViewCreateInfo::from_image(i)).unwrap())
-                .collect();
-
-            let window_extent: [u32; 2] = window_size.into();
-            let render_extent = [
-                (window_extent[0] as f32 * self.render_scale) as u32,
-                (window_extent[1] as f32 * self.render_scale) as u32,
-            ];
-            (
-                rcx.render_image,
-                rcx.render_set,
-                rcx.resample_image,
-                rcx.resample_set,
-            ) = get_images_and_sets(
-                self.memory_allocator.clone(),
-                self.descriptor_set_allocator.clone(),
-                &self.render_pipeline,
-                &self.resample_pipeline,
-                render_extent,
-                window_extent,
-            );
-
-            rcx.recreate_swapchain = false;
-        }
-
-        let (image_index, suboptimal, acquire_future) =
+        let (image_index, suboptimal, acquire_future) = {
+            let rcx = self.rcx.as_mut().unwrap();
             match acquire_next_image(rcx.swapchain.clone(), None).map_err(Validated::unwrap) {
                 Ok(r) => r,
                 Err(VulkanError::OutOfDate) => {
-                    rcx.recreate_swapchain = true;
+                    self.rcx.as_mut().unwrap().recreate_swapchain = true;
                     return;
                 }
                 Err(e) => panic!("failed to acquire next image: {e}"),
-            };
+            }
+        };
 
         if suboptimal {
-            rcx.recreate_swapchain = true;
+            self.rcx.as_mut().unwrap().recreate_swapchain = true;
         }
 
-        rcx.gui.immediate_ui(|gui| {
+        let mut trigger_benchmark = false;
+    let rcx_for_ui = self.rcx.as_mut().unwrap();
+    rcx_for_ui.gui.immediate_ui(|gui| {
             let ctx = gui.context();
 
             egui::Window::new("Settings").show(&ctx, |ui| {
@@ -688,6 +700,9 @@ impl App {
                     }
                 });
                 ui.separator();
+                if ui.button("Benchmark Traversal Variants").clicked() {
+                    trigger_benchmark = true;
+                }
                 ui.add(egui::Slider::new(&mut self.camera.fov, 0.0..=180.0).text("FOV"));
                 if ui
                     .add(
@@ -695,16 +710,16 @@ impl App {
                     )
                     .changed()
                 {
-                    let window_extent: [u32; 2] = rcx.window.inner_size().into();
+                    let window_extent: [u32; 2] = rcx_for_ui.window.inner_size().into();
                     let render_extent = [
                         (window_extent[0] as f32 * self.render_scale) as u32,
                         (window_extent[1] as f32 * self.render_scale) as u32,
                     ];
                     (
-                        rcx.render_image,
-                        rcx.render_set,
-                        rcx.resample_image,
-                        rcx.resample_set,
+                        rcx_for_ui.render_image,
+                        rcx_for_ui.render_set,
+                        rcx_for_ui.resample_image,
+                        rcx_for_ui.resample_set,
                     ) = get_images_and_sets(
                         self.memory_allocator.clone(),
                         self.descriptor_set_allocator.clone(),
@@ -764,7 +779,7 @@ impl App {
                     format_with_commas(voxel_resolution),
                     format_with_commas(voxel_resolution.pow(3))
                 ));
-                let window_extent: [u32; 2] = rcx.window.inner_size().into();
+                let window_extent: [u32; 2] = rcx_for_ui.window.inner_size().into();
                 let render_extent = [
                     (window_extent[0] as f32 * self.render_scale) as u32,
                     (window_extent[1] as f32 * self.render_scale) as u32,
@@ -783,6 +798,63 @@ impl App {
                 ));
             });
         });
+
+        if trigger_benchmark {
+            use std::time::Instant;
+            let frames = 30u32;
+            let branching_pipe: Arc<ComputePipeline> = self.render_pipeline.clone();
+            let branchless_pipe: Arc<ComputePipeline> = self.render_pipeline_branchless.clone();
+            let mut run_variant = |pipe: Arc<ComputePipeline>| {
+                let mut total = Duration::ZERO;
+                for _ in 0..frames {
+                    let rcx = self.rcx.as_mut().unwrap();
+                    let (image_index, suboptimal, acquire_future) = match acquire_next_image(rcx.swapchain.clone(), None).map_err(Validated::unwrap) { Ok(r)=>r, Err(_)=>break};
+                    if suboptimal { rcx.recreate_swapchain = true; }
+                    let render_extent = rcx.render_image.extent();
+                    let pixel_to_ray = self.camera.pixel_to_ray_matrix();
+                    let size = self.voxel_resolution as f64;
+                    let mut scale_and_center = Matrix4::from_diagonal(&Vector4::from_element(size));
+                    scale_and_center.set_column(3, &Vector3::from_element(0.5 * size).push(1.0));
+                    let pixel_to_ray = scale_and_center * pixel_to_ray;
+                    #[derive(BufferContents)]
+                    #[repr(C)]
+                    struct PushConstants { pixel_to_ray: Matrix4<f32>, voxel_resolution: u32, render_mode: u32 }
+                    let push_constants = PushConstants { pixel_to_ray: pixel_to_ray.cast(), voxel_resolution: self.voxel_resolution, render_mode: self.render_mode as u32 };
+                    let mut builder = AutoCommandBufferBuilder::primary(
+                        self.command_buffer_allocator.clone(),
+                        self.queue.queue_family_index(),
+                        CommandBufferUsage::OneTimeSubmit,
+                    ).unwrap();
+                    builder.clear_color_image(ClearColorImageInfo::image(rcx.render_image.clone())).unwrap();
+                    builder.bind_pipeline_compute(pipe.clone()).unwrap()
+                        .push_constants(pipe.layout().clone(), 0, push_constants).unwrap()
+                        .bind_descriptor_sets(PipelineBindPoint::Compute, pipe.layout().clone(), 0, vec![rcx.render_set.clone(), self.voxel_set.clone()]).unwrap();
+                    unsafe { builder.dispatch([render_extent[0].div_ceil(8), render_extent[1].div_ceil(8), 1]).unwrap(); }
+                    let mut info = BlitImageInfo::images(
+                        rcx.render_image.clone(),
+                        rcx.image_views[image_index as usize].image().clone(),
+                    );
+                    info.filter = Filter::Nearest;
+                    builder.blit_image(info).unwrap();
+                    let command_buffer = builder.build().unwrap();
+                    let start = Instant::now();
+                    let future = acquire_future.then_execute(self.queue.clone(), command_buffer).unwrap()
+                        .then_swapchain_present(self.queue.clone(), SwapchainPresentInfo::swapchain_image_index(rcx.swapchain.clone(), image_index))
+                        .then_signal_fence_and_flush().unwrap();
+                    future.wait(None).unwrap();
+                    total += start.elapsed();
+                }
+                total / frames
+            };
+            let branching = run_variant(branching_pipe);
+            let branchless = run_variant(branchless_pipe);
+            println!("Benchmark Results ({} frames each):", frames);
+            println!("  Branching traversal avg frame: {:?}", branching);
+            println!("  Branchless traversal avg frame: {:?}", branchless);
+        }
+
+    // Re-borrow render context for the remainder of the standard render path.
+    let rcx = self.rcx.as_mut().unwrap();
 
         let render_extent = rcx.render_image.extent();
         let resample_extent = rcx.resample_image.extent();
