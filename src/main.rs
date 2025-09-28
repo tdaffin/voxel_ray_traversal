@@ -140,16 +140,43 @@ fn get_swapchain_images(
 
     let composite_alpha = caps.supported_composite_alpha.into_iter().next().unwrap();
 
+    // Determine a supported present mode, preferring Mailbox > Immediate > Fifo > FifoRelaxed.
+    // FIFO is guaranteed to be supported by the Vulkan spec, so we fall back to it.
+    let supported_present_modes = device
+        .physical_device()
+        .surface_present_modes(surface, Default::default())
+        .unwrap();
+    let preferred = [
+        PresentMode::Mailbox,
+        PresentMode::Immediate,
+        PresentMode::Fifo,
+        PresentMode::FifoRelaxed,
+    ];
+    let present_mode = preferred
+        .into_iter()
+        .find(|m| supported_present_modes.contains(m))
+        .unwrap_or(PresentMode::Fifo);
+
+    // Choose image count (triple buffering if possible, otherwise clamp to supported range)
+    let desired_image_count = 3u32.max(caps.min_image_count);
+    let image_count = if let Some(max) = caps.max_image_count {
+        desired_image_count.min(max)
+    } else {
+        desired_image_count
+    };
+
+    println!("Creating swapchain with present mode: {:?} (supported: {:?})", present_mode, supported_present_modes);
+
     Swapchain::new(
         device.clone(),
         surface.clone(),
         SwapchainCreateInfo {
-            min_image_count: caps.min_image_count.max(3),
+            min_image_count: image_count,
             image_format,
             image_extent: window.inner_size().into(),
             image_usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_DST,
             composite_alpha,
-            present_mode: PresentMode::Immediate,
+            present_mode,
             ..Default::default()
         },
     )
