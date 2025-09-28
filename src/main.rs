@@ -56,6 +56,8 @@ mod voxelize;
 
 use crate::camera::Camera;
 use crate::hot_reload::HotReloadComputePipeline;
+mod voxel;
+use voxel::build_voxel_descriptor_set;
 
 const INITIAL_VOXEL_RESOLUTION: u32 = 24;
 const INITIAL_WINDOW_RESOLUTION: PhysicalSize<u32> = PhysicalSize::new(960, 960);
@@ -276,27 +278,6 @@ fn get_images_and_sets(
     (render_image, render_set, resample_image, resample_set)
 }
 
-/// Utility to build the voxel descriptor set (set=1) from provided image views.
-/// Expects image_views.len() == 3 matching the shader bindings 0,1,2.
-fn get_voxel_set(
-    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-    render_pipeline: &ComputePipeline,
-    image_views: &[Arc<ImageView>],
-) -> Arc<DescriptorSet> {
-    debug_assert_eq!(image_views.len(), 3, "Expected exactly three voxel image views");
-    let layout = render_pipeline.layout().set_layouts()[1].clone();
-    DescriptorSet::new(
-        descriptor_set_allocator,
-        layout,
-        [
-            WriteDescriptorSet::image_view(0, image_views[0].clone()),
-            WriteDescriptorSet::image_view(1, image_views[1].clone()),
-            WriteDescriptorSet::image_view(2, image_views[2].clone()),
-        ],
-        [],
-    )
-    .unwrap()
-}
 
 fn load_icon(icon: &[u8]) -> Icon {
     let (icon_rgba, icon_width, icon_height) = {
@@ -490,7 +471,7 @@ impl App {
                 let image_view = ImageView::new(image.clone(), ImageViewCreateInfo::from_image(&image)).unwrap();
                 image_views.push(image_view);
             }
-            get_voxel_set(descriptor_set_allocator.clone(), &render_pipeline, &image_views)
+            build_voxel_descriptor_set(descriptor_set_allocator.clone(), &render_pipeline, &image_views)
         };
 
         let input = WinitInputHelper::new();
@@ -765,7 +746,7 @@ impl App {
                         let image_view = ImageView::new(image.clone(), ImageViewCreateInfo::from_image(&image)).unwrap();
                         image_views.push(image_view);
                     }
-                    self.voxel_set = get_voxel_set(self.descriptor_set_allocator.clone(), &self.render_pipeline, &image_views);
+                    self.voxel_set = build_voxel_descriptor_set(self.descriptor_set_allocator.clone(), &self.render_pipeline, &image_views);
                 }
             });
             egui::Window::new("Stats").show(&ctx, |ui| {
