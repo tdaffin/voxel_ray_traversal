@@ -57,6 +57,9 @@ use crate::camera::Camera;
 use crate::hot_reload::HotReloadComputePipeline;
 mod voxel;
 use voxel::{build_voxel_descriptor_set, create_voxel_image_views};
+use voxel::create_empty_voxel_placeholder;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 
 const INITIAL_VOXEL_RESOLUTION: u32 = 24;
 const INITIAL_WINDOW_RESOLUTION: PhysicalSize<u32> = PhysicalSize::new(960, 960);
@@ -306,6 +309,9 @@ struct App {
     future_voxel_resolution: u32,
     model: Model,
     active_voxel_grids: u32,
+    voxel_result_rx: Receiver<(usize, Vec<u128>)>,
+    voxel_views: Vec<Option<Arc<ImageView>>>,
+    placeholder_view: Arc<ImageView>,
 
     camera: Camera,
     render_mode: RenderMode,
@@ -432,20 +438,31 @@ impl App {
 
         let voxel_resolution = INITIAL_VOXEL_RESOLUTION;
         let model = Model::Bunny;
-        let voxel_set = {
-            use rayon::prelude::*;
-            let all_voxels: Vec<Vec<u128>> = Model::ALL.par_iter()
-                .map(|m| voxelize::ply_to_voxels(m.path(), voxel_resolution))
-                .collect();
-            let image_views = create_voxel_image_views(
-                memory_allocator.clone(),
-                command_buffer_allocator.clone(),
-                queue.clone(),
-                all_voxels,
-                voxel_resolution,
-            );
-            build_voxel_descriptor_set(descriptor_set_allocator.clone(), &render_pipeline, &image_views)
-        };
+        // Start with a single placeholder so we can build a descriptor set immediately.
+        let placeholder_view = create_empty_voxel_placeholder(
+            memory_allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            voxel_resolution,
+        );
+        let voxel_set = build_voxel_descriptor_set(
+            descriptor_set_allocator.clone(),
+            &render_pipeline,
+            std::slice::from_ref(&placeholder_view),
+        );
+        // Channel for background voxelization results (model_index, voxel data)
+        let (tx, rx) = mpsc::channel();
+        for (idx, model) in Model::ALL.iter().enumerate() {
+            let tx = tx.clone();
+            let path = model.path().as_ref().to_path_buf();
+            let res = voxel_resolution;
+            thread::spawn(move || {
+                let vox = voxelize::ply_to_voxels(path, res);
+                let _ = tx.send((idx, vox));
+            });
+        }
+        drop(tx); // close extra sender
+        let voxel_views: Vec<Option<Arc<ImageView>>> = vec![None; Model::ALL.len()];
         let active_voxel_grids = Model::ALL.len() as u32;
 
         let input = WinitInputHelper::new();
@@ -481,6 +498,9 @@ impl App {
             future_voxel_resolution: voxel_resolution,
             model,
             active_voxel_grids,
+            voxel_result_rx: rx,
+            voxel_views,
+            placeholder_view,
             camera,
             render_mode: RenderMode::Coord,
             render_scale: 1.0,
@@ -492,6 +512,31 @@ impl App {
             rcx: None,
         }
 
+    }
+
+    fn start_background_voxelization(&mut self) {
+        // Clear previous state
+        for v in &mut self.voxel_views { *v = None; }
+        self.active_voxel_grids = 0;
+        // Build a descriptor set with just the placeholder (already exists as first fallback)
+        self.voxel_set = build_voxel_descriptor_set(
+            self.descriptor_set_allocator.clone(),
+            &self.render_pipeline,
+            std::slice::from_ref(&self.placeholder_view),
+        );
+        let (tx, rx) = mpsc::channel();
+        self.voxel_result_rx = rx;
+        let res = self.voxel_resolution;
+        for (idx, model) in Model::ALL.iter().enumerate() {
+            let txc = tx.clone();
+            let path = model.path().as_ref().to_path_buf();
+            thread::spawn(move || {
+                let vox = voxelize::ply_to_voxels(path, res);
+                let _ = txc.send((idx, vox));
+            });
+        }
+        // drop original sender so channel closes when all jobs done
+        drop(tx);
     }
 
     fn update(&mut self, event_loop: &ActiveEventLoop) {
@@ -520,6 +565,38 @@ impl App {
             self.camera.fov = ((tanfov * (ds.1 as f64 * -0.1).exp()).atan() * 2.0).to_degrees();
         }
         let rcx = self.rcx.as_mut().unwrap();
+        // Drain any completed voxelization results and upload to GPU
+        while let Ok((idx, voxels)) = self.voxel_result_rx.try_recv() {
+            if idx < self.voxel_views.len() {
+                let view = voxel::create_voxel_image_view(
+                    self.memory_allocator.clone(),
+                    self.command_buffer_allocator.clone(),
+                    self.queue.clone(),
+                    voxels,
+                    self.voxel_resolution,
+                );
+                self.voxel_views[idx] = Some(view);
+            }
+            // Rebuild descriptor set with contiguous ready views from start
+            let mut ready: Vec<Arc<ImageView>> = Vec::new();
+            for opt in &self.voxel_views {
+                match opt {
+                    Some(v) => ready.push(v.clone()),
+                    None => break, // stop at first gap to keep indices compact
+                }
+            }
+            self.active_voxel_grids = ready.len() as u32;
+            if self.active_voxel_grids == 0 {
+                // keep placeholder set
+            } else {
+                let voxel_set = build_voxel_descriptor_set(
+                    self.descriptor_set_allocator.clone(),
+                    &self.render_pipeline,
+                    &ready,
+                );
+                self.voxel_set = voxel_set;
+            }
+        }
         if self.input.mouse_pressed(MouseButton::Left) {
             self.focused = true;
             rcx.window.set_cursor_grab(CursorGrabMode::Confined).unwrap();
@@ -601,6 +678,8 @@ impl App {
 
         let mut trigger_benchmark = false;
     let rcx_for_ui = self.rcx.as_mut().unwrap();
+    // Defer actions requiring &mut self after UI closure to avoid borrow conflicts.
+    let mut request_regen_voxels = false;
     rcx_for_ui.gui.immediate_ui(|gui| {
             let ctx = gui.context();
 
@@ -658,24 +737,7 @@ impl App {
                     }
                 });
                 if ui.button("Generate Voxel Grid").clicked() {
-                    self.voxel_resolution = self.future_voxel_resolution;
-                    // Regenerate all three voxel grids at new resolution.
-                    use rayon::prelude::*;
-                    let all_voxels: Vec<Vec<u128>> = Model::ALL.par_iter()
-                        .map(|m| voxelize::ply_to_voxels(m.path(), self.voxel_resolution))
-                        .collect();
-                    let image_views = create_voxel_image_views(
-                        self.memory_allocator.clone(),
-                        self.command_buffer_allocator.clone(),
-                        self.queue.clone(),
-                        all_voxels,
-                        self.voxel_resolution,
-                    );
-                    self.voxel_set = build_voxel_descriptor_set(
-                        self.descriptor_set_allocator.clone(),
-                        &self.render_pipeline,
-                        &image_views,
-                    );
+                    request_regen_voxels = true;
                 }
             });
             egui::Window::new("Stats").show(&ctx, |ui| {
@@ -718,6 +780,16 @@ impl App {
                 ));
             });
         });
+    if request_regen_voxels {
+        self.voxel_resolution = self.future_voxel_resolution;
+        self.placeholder_view = create_empty_voxel_placeholder(
+            self.memory_allocator.clone(),
+            self.command_buffer_allocator.clone(),
+            self.queue.clone(),
+            self.voxel_resolution,
+        );
+        self.start_background_voxelization();
+    }
 
         if trigger_benchmark {
             use std::time::Instant;
@@ -813,11 +885,12 @@ impl App {
             render_mode: u32,
             voxel_count: u32,
         }
+        let effective_count = self.active_voxel_grids.min(Model::ALL.len() as u32).max(1); // ensure at least placeholder
         let push_constants = PushConstants {
             pixel_to_ray: pixel_to_ray.cast(),
             voxel_resolution: self.voxel_resolution,
             render_mode: self.render_mode as u32,
-            voxel_count: self.active_voxel_grids.min(Model::ALL.len() as u32),
+            voxel_count: effective_count,
         };
 
         let mut builder = AutoCommandBufferBuilder::primary(

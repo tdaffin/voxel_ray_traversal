@@ -72,6 +72,27 @@ pub fn create_voxel_image_view(
     ImageView::new(image.clone(), vulkano::image::view::ImageViewCreateInfo::from_image(&image)).expect("Failed to create image view")
 }
 
+/// Create an empty placeholder voxel image view (all zeros) so the app can start immediately
+/// before real voxel data is ready. This allocates the correctly sized 3D image for the current
+/// resolution but does not perform any geometry processing.
+pub fn create_empty_voxel_placeholder(
+    memory_allocator: Arc<StandardMemoryAllocator>,
+    command_buffer_allocator: Arc<vulkano::command_buffer::allocator::StandardCommandBufferAllocator>,
+    queue: Arc<Queue>,
+    resolution: u32,
+) -> Arc<ImageView> {
+    // Correct number of packed texels (resolution^3 / 128) all zeroed.
+    let voxel_texel_count = (resolution as usize).pow(3) / 128;
+    let zeros = vec![0u128; voxel_texel_count.max(1)];
+    create_voxel_image_view(
+        memory_allocator,
+        command_buffer_allocator,
+        queue,
+        zeros,
+        resolution,
+    )
+}
+
 /// Batch-create voxel image views from multiple packed voxel arrays in parallel voxelization context.
 pub fn create_voxel_image_views(
     memory_allocator: Arc<StandardMemoryAllocator>,
