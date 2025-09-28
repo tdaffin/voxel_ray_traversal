@@ -12,10 +12,9 @@ use std::{
 };
 use vulkano::{
     Validated, Version, VulkanError, VulkanLibrary,
-    buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage},
+    buffer::{BufferContents},
     command_buffer::{
         AutoCommandBufferBuilder, BlitImageInfo, ClearColorImageInfo, CommandBufferUsage,
-        CopyBufferToImageInfo, PrimaryCommandBufferAbstract,
         allocator::StandardCommandBufferAllocator,
     },
     descriptor_set::{
@@ -27,7 +26,7 @@ use vulkano::{
     },
     format::Format,
     image::{
-        Image, ImageCreateInfo, ImageType, ImageUsage,
+        Image, ImageCreateInfo, ImageUsage,
         sampler::Filter,
         view::{ImageView, ImageViewCreateInfo},
     },
@@ -57,7 +56,7 @@ mod voxelize;
 use crate::camera::Camera;
 use crate::hot_reload::HotReloadComputePipeline;
 mod voxel;
-use voxel::build_voxel_descriptor_set;
+use voxel::{build_voxel_descriptor_set, create_voxel_image_views};
 
 const INITIAL_VOXEL_RESOLUTION: u32 = 24;
 const INITIAL_WINDOW_RESOLUTION: PhysicalSize<u32> = PhysicalSize::new(960, 960);
@@ -432,67 +431,36 @@ impl App {
 
         let voxel_resolution = INITIAL_VOXEL_RESOLUTION;
         let model = Model::Bunny;
-        // Generate all three voxel grids (Bunny, Dragon, Armadillo) side-by-side (voxelization parallelized).
         let voxel_set = {
             use rayon::prelude::*;
             let all_voxels: Vec<Vec<u128>> = Model::ALL.par_iter()
                 .map(|m| voxelize::ply_to_voxels(m.path(), voxel_resolution))
                 .collect();
-            let mut image_views = Vec::new();
-            for voxels in all_voxels.into_iter() {
-                let image = Image::new(
-                    memory_allocator.clone(),
-                    ImageCreateInfo {
-                        image_type: ImageType::Dim3d,
-                        format: Format::R32G32B32A32_UINT,
-                        extent: [voxel_resolution / 4, voxel_resolution / 4, voxel_resolution / 8],
-                        usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_DST,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo::default(),
-                ).unwrap();
-
-                let src_buffer = Buffer::from_iter(
-                    memory_allocator.clone(),
-                    BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
-                    AllocationCreateInfo { memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE, ..Default::default() },
-                    voxels,
-                ).unwrap();
-
-                let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
-                    command_buffer_allocator.clone(),
-                    queue.queue_family_index(),
-                    CommandBufferUsage::OneTimeSubmit,
-                ).unwrap();
-                command_buffer_builder
-                    .clear_color_image(ClearColorImageInfo::image(image.clone())).unwrap()
-                    .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(src_buffer, image.clone())).unwrap();
-                let _ = command_buffer_builder.build().unwrap().execute(queue.clone()).unwrap();
-                let image_view = ImageView::new(image.clone(), ImageViewCreateInfo::from_image(&image)).unwrap();
-                image_views.push(image_view);
-            }
+            let image_views = create_voxel_image_views(
+                memory_allocator.clone(),
+                command_buffer_allocator.clone(),
+                queue.clone(),
+                all_voxels,
+                voxel_resolution,
+            );
             build_voxel_descriptor_set(descriptor_set_allocator.clone(), &render_pipeline, &image_views)
         };
 
         let input = WinitInputHelper::new();
 
-        // Adjust default camera to frame the three side-by-side voxel grids.
-        // Grids are placed along +X with stride (resolution + 0.25*resolution).
-        // Center of the trio is roughly at x = stride (middle grid), y = res/2, z = res/2.
-        let res_f = 1.0f64;//voxel_resolution as f64;
+        // Camera setup to frame all three grids.
+        let res_f = 1.0f64;
         let spacing = res_f * 0.25; // matches shader
         let stride = res_f + spacing;
         let target = Vector3::new(stride, res_f * 0.5, res_f * 0.5);
-        // Position the camera back and up diagonally so all three fit in view.
-        // Place it at a distance proportional to total width (approx 2*stride + res) and some height.
-        let total_width = 2.0 * stride + res_f; // from start of first to end of third
-        let dist = total_width * 1.2; // back off a bit more than width for margin
+        let total_width = 2.0 * stride + res_f;
+        let dist = total_width * 1.2;
         let cam_pos = target + Vector3::new(-dist, dist * 0.6, dist * 0.8);
         let mut camera = Camera::new(
             cam_pos,
             Vector3::zeros(),
             INITIAL_WINDOW_RESOLUTION.into(),
-            35.0, // wider FOV to ensure all three grids are visible
+            35.0,
         );
         camera.look_at(target);
 
@@ -500,81 +468,58 @@ impl App {
             instance,
             device,
             queue,
-
             memory_allocator,
             descriptor_set_allocator,
             command_buffer_allocator,
-
             render_pipeline,
             render_pipeline_branchless,
             resample_pipeline,
-
             voxel_set,
             voxel_resolution,
             future_voxel_resolution: voxel_resolution,
             model,
-
             camera,
             render_mode: RenderMode::Coord,
             render_scale: 1.0,
-
             input,
             focused: false,
             last_second: Instant::now(),
             frames_since_last_second: 0,
             fps: 0,
-
             rcx: None,
         }
+
     }
 
     fn update(&mut self, event_loop: &ActiveEventLoop) {
+        self.frames_since_last_second += 1;
         let now = Instant::now();
-        if now.duration_since(self.last_second) > Duration::from_secs(1) {
+        if now - self.last_second >= Duration::from_secs(1) {
             self.fps = self.frames_since_last_second;
             self.frames_since_last_second = 0;
             self.last_second = now;
         }
-        self.frames_since_last_second += 1;
-
-        let Some(delta_time) = self.input.delta_time().as_ref().map(Duration::as_secs_f64) else {
-            return;
-        };
-
-        if self.input.close_requested() {
-            event_loop.exit();
-            return;
-        }
-
+        let Some(delta_time) = self.input.delta_time().as_ref().map(Duration::as_secs_f64) else { return; };
+        if self.input.close_requested() { event_loop.exit(); return; }
         if self.focused {
             let t = |k: KeyCode| self.input.key_held(k) as u8 as f64;
-
             let v = Vector3::new(KeyCode::KeyD, KeyCode::KeyW, KeyCode::KeyQ).map(t)
                 - Vector3::new(KeyCode::KeyA, KeyCode::KeyS, KeyCode::KeyE).map(t);
-
-            self.camera.position +=
-                (self.camera.rotation_matrix() * v.push(0.0) * delta_time).xyz();
-
+            self.camera.position += (self.camera.rotation_matrix() * v.push(0.0) * delta_time).xyz();
             let sens = 0.001 * (self.camera.fov.to_radians() * 0.5).tan();
-
             let (dx, dy) = self.input.mouse_diff();
             self.camera.rotation.z -= dx as f64 * sens;
             self.camera.rotation.x -= dy as f64 * sens;
             self.camera.rotation.x = self.camera.rotation.x.clamp(-FRAC_PI_2, FRAC_PI_2);
             self.camera.rotation.y = self.camera.rotation.y.rem_euclid(TAU);
-
             let ds = self.input.scroll_diff();
             let tanfov = (self.camera.fov.to_radians() * 0.5).tan();
             self.camera.fov = ((tanfov * (ds.1 as f64 * -0.1).exp()).atan() * 2.0).to_degrees();
         }
-
         let rcx = self.rcx.as_mut().unwrap();
-
         if self.input.mouse_pressed(MouseButton::Left) {
             self.focused = true;
-            rcx.window
-                .set_cursor_grab(CursorGrabMode::Confined)
-                .unwrap();
+            rcx.window.set_cursor_grab(CursorGrabMode::Confined).unwrap();
             rcx.window.set_cursor_visible(false);
         }
         if self.input.key_pressed(KeyCode::Escape) {
@@ -715,38 +660,18 @@ impl App {
                     let all_voxels: Vec<Vec<u128>> = Model::ALL.par_iter()
                         .map(|m| voxelize::ply_to_voxels(m.path(), self.voxel_resolution))
                         .collect();
-                    let mut image_views = Vec::new();
-                    for voxels in all_voxels.into_iter() {
-                        let image = Image::new(
-                            self.memory_allocator.clone(),
-                            ImageCreateInfo {
-                                image_type: ImageType::Dim3d,
-                                format: Format::R32G32B32A32_UINT,
-                                extent: [self.voxel_resolution / 4, self.voxel_resolution / 4, self.voxel_resolution / 8],
-                                usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_DST,
-                                ..Default::default()
-                            },
-                            AllocationCreateInfo::default(),
-                        ).unwrap();
-                        let src_buffer = Buffer::from_iter(
-                            self.memory_allocator.clone(),
-                            BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
-                            AllocationCreateInfo { memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE, ..Default::default() },
-                            voxels,
-                        ).unwrap();
-                        let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
-                            self.command_buffer_allocator.clone(),
-                            self.queue.queue_family_index(),
-                            CommandBufferUsage::OneTimeSubmit,
-                        ).unwrap();
-                        command_buffer_builder
-                            .clear_color_image(ClearColorImageInfo::image(image.clone())).unwrap()
-                            .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(src_buffer, image.clone())).unwrap();
-                        let _ = command_buffer_builder.build().unwrap().execute(self.queue.clone()).unwrap();
-                        let image_view = ImageView::new(image.clone(), ImageViewCreateInfo::from_image(&image)).unwrap();
-                        image_views.push(image_view);
-                    }
-                    self.voxel_set = build_voxel_descriptor_set(self.descriptor_set_allocator.clone(), &self.render_pipeline, &image_views);
+                    let image_views = create_voxel_image_views(
+                        self.memory_allocator.clone(),
+                        self.command_buffer_allocator.clone(),
+                        self.queue.clone(),
+                        all_voxels,
+                        self.voxel_resolution,
+                    );
+                    self.voxel_set = build_voxel_descriptor_set(
+                        self.descriptor_set_allocator.clone(),
+                        &self.render_pipeline,
+                        &image_views,
+                    );
                 }
             });
             egui::Window::new("Stats").show(&ctx, |ui| {
