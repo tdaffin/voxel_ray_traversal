@@ -307,7 +307,9 @@ struct App {
 
     voxel_set: Arc<DescriptorSet>, // now holds 3 voxel grids
     voxel_resolution: u32,
-    future_voxel_resolution: u32,
+    // New per-grid resolution data (initially all equal to voxel_resolution until shader updated)
+    grid_resolutions: Vec<u32>,
+    future_grid_resolutions: Vec<u32>,
     model: Model,
     active_voxel_grids: u32,
     voxel_result_rx: Receiver<VoxelJobMessage>,
@@ -448,7 +450,9 @@ impl App {
         let resample_pipeline =
             HotReloadComputePipeline::new(device.clone(), &shaders_dir.join("resample.comp"));
 
-        let voxel_resolution = INITIAL_VOXEL_RESOLUTION;
+    let voxel_resolution = INITIAL_VOXEL_RESOLUTION;
+    let grid_resolutions = vec![voxel_resolution; Model::ALL.len()];
+    let future_grid_resolutions = grid_resolutions.clone();
         let model = Model::Bunny;
         // Start with a single placeholder so we can build a descriptor set immediately.
         let placeholder_view = create_empty_voxel_placeholder(
@@ -468,7 +472,7 @@ impl App {
         for (idx, model) in Model::ALL.iter().enumerate() {
             let tx = tx.clone();
             let path = model.path().as_ref().to_path_buf();
-            let res = voxel_resolution;
+            let res = grid_resolutions[idx];
             let generation_id = voxel_generation;
             thread::spawn(move || {
                 let vox = voxelize::ply_to_voxels(path, res); // initial sync path (no progress)
@@ -512,7 +516,8 @@ impl App {
             resample_pipeline,
             voxel_set,
             voxel_resolution,
-            future_voxel_resolution: voxel_resolution,
+            grid_resolutions,
+            future_grid_resolutions,
             model,
             active_voxel_grids,
             voxel_result_rx: rx,
@@ -553,7 +558,6 @@ impl App {
         );
         let (tx, rx) = mpsc::channel();
         self.voxel_result_rx = rx;
-        let res = self.voxel_resolution;
         let generation_id = self.voxel_generation;
         let cancel_flag = self.voxel_cancel_flag.clone();
         for (idx, model) in Model::ALL.iter().enumerate() {
@@ -561,6 +565,7 @@ impl App {
             let path = model.path().as_ref().to_path_buf();
             let gen_thread = generation_id;
             let cancel_local = cancel_flag.clone();
+            let res_for_grid = self.grid_resolutions[idx];
             thread::spawn(move || {
                 use voxelize::{ply_to_voxels_with_progress, VoxelProgressCallbacks};
                 let cancelled = cancel_local.clone();
@@ -573,7 +578,7 @@ impl App {
                         }
                     })),
                 };
-                if let Some(vox) = ply_to_voxels_with_progress(path, res, prog_cb) {
+                if let Some(vox) = ply_to_voxels_with_progress(path, res_for_grid, prog_cb) {
                     if !cancelled.load(Ordering::Relaxed) {
                         let _ = txc.send(VoxelJobMessage::Finished { generation: gen_thread, index: idx, data: vox });
                     } else {
@@ -782,23 +787,22 @@ impl App {
                     );
                 }
 
-                ui.add(
-                    egui::Slider::new(&mut self.future_voxel_resolution, 8..=3200)
-                    .custom_formatter(|n, _| format!("{}", (n as u32).div_ceil(8) * 8))
-                    .custom_parser(|s| s.parse::<u32>().ok().map(|n| n.div_ceil(8) * 8).map(|n| n as f64))
-                    .text("Voxel Resolution")
-                );
-                self.future_voxel_resolution = self.future_voxel_resolution.div_ceil(8) * 8;
-                ui.colored_label(Color32::LIGHT_RED, "Warning: Setting voxel resolution too high might crash the program.");
-                ui.label("The maximum possible resolution will depend on your GPU's Vulkan limits. This could be mitigated by splitting the world into multiple textures but that's not included in this simple example.");
+                ui.colored_label(Color32::LIGHT_RED, "Warning: Very high resolutions may exhaust GPU memory.");
+                ui.label("Each grid can now have its own resolution (multiple of 8).");
+                for i in 0..self.future_grid_resolutions.len() {
+                    let mut val = self.future_grid_resolutions[i];
+                    let label = format!("Grid {i} Res");
+                    if ui.add(egui::Slider::new(&mut val, 8..=4096).text(label)).changed() {
+                        val = val.div_ceil(8) * 8;
+                        self.future_grid_resolutions[i] = val;
+                    }
+                }
                 ui.horizontal(|ui| {
                     for &model in Model::ALL {
                         ui.selectable_value(&mut self.model, model, format!("{:?}", model));
                     }
                 });
-                if ui.button("Generate Voxel Grid").clicked() {
-                    request_regen_voxels = true;
-                }
+                if ui.button("Regenerate Grids").clicked() { request_regen_voxels = true; }
                 if ui.button("Cancel Voxelization").clicked() {
                     self.cancel_requested = true;
                     self.voxel_cancel_flag.store(true, Ordering::Relaxed);
@@ -856,12 +860,19 @@ impl App {
             });
         });
     if request_regen_voxels {
-        self.voxel_resolution = self.future_voxel_resolution;
+        // Copy future per-grid resolutions into active ones (truncate/extend safely)
+        for (i, r) in self.future_grid_resolutions.clone().into_iter().enumerate() {
+            if i < self.grid_resolutions.len() { self.grid_resolutions[i] = r.div_ceil(8) * 8; }
+        }
+        // Keep legacy voxel_resolution for placeholder scaling / camera framing using max grid size for now
+        if let Some(maxr) = self.grid_resolutions.iter().copied().max() { self.voxel_resolution = maxr; }
+        // Placeholder minimized to 8 regardless of targets
+        let placeholder_res = 8u32;
         self.placeholder_view = create_empty_voxel_placeholder(
             self.memory_allocator.clone(),
             self.command_buffer_allocator.clone(),
             self.queue.clone(),
-            self.voxel_resolution,
+            placeholder_res,
         );
         self.start_background_voxelization();
     }
@@ -891,9 +902,13 @@ impl App {
                     let pixel_to_ray = scale_and_center * pixel_to_ray;
                     #[derive(BufferContents)]
                     #[repr(C)]
-                    struct PushConstants { pixel_to_ray: Matrix4<f32>, voxel_resolution: u32, render_mode: u32, voxel_count: u32 }
-                    let voxel_count = self.active_voxel_grids.min(Model::ALL.len() as u32);
-                    let push_constants = PushConstants { pixel_to_ray: pixel_to_ray.cast(), voxel_resolution: self.voxel_resolution, render_mode: self.render_mode as u32, voxel_count };
+                    struct PushConstants { pixel_to_ray: Matrix4<f32>, voxel_count: u32, render_mode: u32, _pad:[u32;2], resolutions:[u32;3] }
+                    // Clamp to 3 since shader only declares space for 3 grids now
+                    let voxel_count = self.active_voxel_grids.min(Model::ALL.len() as u32).max(1).min(3);
+                    let mut resolutions = [0u32;3];
+                    for (i,r) in self.grid_resolutions.iter().take(3).enumerate() { resolutions[i]=*r; }
+                    if voxel_count as usize > self.grid_resolutions.len() { resolutions[0]=self.voxel_resolution; }
+                    let push_constants = PushConstants { pixel_to_ray: pixel_to_ray.cast(), voxel_count, render_mode: self.render_mode as u32, _pad:[0,0], resolutions };
                     let mut builder = AutoCommandBufferBuilder::primary(
                         self.command_buffer_allocator.clone(),
                         self.queue.queue_family_index(),
@@ -952,21 +967,28 @@ impl App {
         scale_and_center.set_column(3, &Vector3::from_element(0.5 * size).push(1.0));
         let pixel_to_ray = scale_and_center * pixel_to_ray;
 
-        #[derive(BufferContents)]
-        #[repr(C)]
-        struct PushConstants {
-            pixel_to_ray: Matrix4<f32>,
-            voxel_resolution: u32,
-            render_mode: u32,
-            voxel_count: u32,
-        }
-        let effective_count = self.active_voxel_grids.min(Model::ALL.len() as u32).max(1); // ensure at least placeholder
-        let push_constants = PushConstants {
-            pixel_to_ray: pixel_to_ray.cast(),
-            voxel_resolution: self.voxel_resolution,
-            render_mode: self.render_mode as u32,
-            voxel_count: effective_count,
-        };
+            #[derive(BufferContents)]
+            #[repr(C)]
+            struct PushConstants {
+                pixel_to_ray: Matrix4<f32>,
+                voxel_count: u32,
+                render_mode: u32,
+                _pad: [u32; 2],
+                resolutions: [u32; 3],
+            }
+            let effective_count = self.active_voxel_grids.min(Model::ALL.len() as u32).max(1).min(3);
+            let mut res_arr = [0u32; 3];
+            for (i, r) in self.grid_resolutions.iter().take(3).enumerate() { res_arr[i] = *r; }
+            if effective_count as usize > self.grid_resolutions.len() { // placeholder path
+                res_arr[0] = self.voxel_resolution;
+            }
+            let push_constants = PushConstants {
+                pixel_to_ray: pixel_to_ray.cast(),
+                voxel_count: effective_count,
+                render_mode: self.render_mode as u32,
+                _pad: [0, 0],
+                resolutions: res_arr,
+            };
 
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),

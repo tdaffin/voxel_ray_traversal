@@ -12,9 +12,10 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(push_constant) uniform PushConstants {
     mat4 pixelToRay;
-    uint voxel_resolution;
-    uint render_mode;
     uint voxel_count;
+    uint render_mode;
+    uvec2 _pad; // alignment padding
+    uvec3 resolutions; // per-grid resolutions (only first voxel_count used)
 } pc;
 
 layout(set = 0, binding = 0, rgba8) writeonly uniform image2D targetImage;
@@ -177,7 +178,7 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uint voxel_resolution, out 
 }
 
 void renderSteps(ivec2 pixelCoord, uint steps, uint vr) {
-    vec3 color = stepsToInferno(steps, 0, (vr - 1) * 3);
+    vec3 color = stepsToInferno(steps, 0, max(1u, (vr - 1)) * 3);
     imageStore(targetImage, pixelCoord, vec4(color, 1));
 }
 
@@ -191,19 +192,28 @@ void main() {
     vec3 ro = pc.pixelToRay[3].xyz;
     vec3 rd = mat3(pc.pixelToRay) * vec3(pixelCoord, 1);
 
-    uint vr = pc.voxel_resolution;
     uint gridCount = pc.voxel_count;
-    float spacing = float(vr) * 0.25; // 25% of resolution gap
-    float stride = float(vr) + spacing;
+    // Precompute origins along X using each grid's own resolution plus 25% spacing of that grid size.
+    float origins[MAX_GRIDS];
+    float sizes[MAX_GRIDS];
+    float cursor = 0.0;
+    for (uint g = 0; g < gridCount; ++g) {
+    uint res = pc.resolutions[g];
+        float size = float(res);
+        float spacing = size * 0.25;
+        origins[g] = cursor;
+        sizes[g] = size;
+        cursor += size + spacing;
+    }
 
     // MAX_GRIDS defined above
     float tEnter[MAX_GRIDS];
     float tExit[MAX_GRIDS];
     for (int i = 0; i < MAX_GRIDS; ++i) { tEnter[i] = FLT_MAX; tExit[i] = -1.0; }
     for (int g = 0; g < int(gridCount); g++) {
-        vec3 origin = vec3(stride * g, 0, 0);
+        vec3 origin = vec3(origins[g], 0, 0);
         vec3 bmin = origin;
-        vec3 bmax = origin + vec3(vr);
+        vec3 bmax = origin + vec3(sizes[g]);
         vec3 inv_dir = 1. / rd;
         vec3 t0 = (bmin - ro) * inv_dir;
         vec3 t1 = (bmax - ro) * inv_dir;
@@ -239,9 +249,9 @@ void main() {
         // Find grid whose intersection start matches this tEnter (within epsilon).
         int gridIdx = -1;
         for (int g = 0; g < int(gridCount); g++) {
-            vec3 origin = vec3(stride * g, 0, 0);
+            vec3 origin = vec3(origins[g], 0, 0);
             vec3 bmin = origin;
-            vec3 bmax = origin + vec3(vr);
+            vec3 bmax = origin + vec3(sizes[g]);
             vec3 inv_dir = 1. / rd;
             vec3 t0 = (bmin - ro) * inv_dir;
             vec3 t1 = (bmax - ro) * inv_dir;
@@ -252,7 +262,8 @@ void main() {
             if (abs(tmin - tEnter[order]) < 1e-5 && abs(tmax - tExit[order]) < 1e-5) { gridIdx = g; break; }
         }
         if (gridIdx < 0) continue; // shouldn't happen
-        vec3 localOrigin = ro - vec3(stride * gridIdx, 0, 0);
+    uint vr = pc.resolutions[gridIdx];
+        vec3 localOrigin = ro - vec3(origins[gridIdx], 0, 0);
         uint stepsBefore = steps;
         if (traversal(gridIdx, localOrigin, rd, vr, color, steps)) {
             hit = true;
@@ -265,6 +276,7 @@ void main() {
             // traversal missed inside this grid volume; continue to next grid. steps already accumulated.
         }
     }
-    if (steps > 0 && pc.render_mode == STEPS)
-        renderSteps(pixelCoord, steps, vr);
+    // If no hit, optionally visualize steps vs first grid size (fallback)
+    if (steps > 0 && pc.render_mode == STEPS && gridCount > 0)
+        renderSteps(pixelCoord, steps, pc.resolutions[0]);
 }
