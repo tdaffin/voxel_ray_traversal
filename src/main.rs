@@ -4,6 +4,7 @@ mod app;
 mod camera;
 mod hot_reload;
 mod model;
+mod push_constants;
 mod render_mode;
 mod rendering;
 mod voxel;

@@ -2,7 +2,7 @@ use egui_winit_vulkano::{
     Gui, GuiConfig,
     egui::{self, Color32},
 };
-use nalgebra::{Matrix4, Vector3, Vector4};
+use nalgebra::Vector3;
 use std::path::PathBuf;
 use std::{
     f64::consts::{FRAC_PI_2, TAU},
@@ -11,7 +11,6 @@ use std::{
 };
 use vulkano::{
     Validated, Version, VulkanError, VulkanLibrary,
-    buffer::BufferContents,
     command_buffer::{
         AutoCommandBufferBuilder, BlitImageInfo, ClearColorImageInfo, CommandBufferUsage,
         allocator::StandardCommandBufferAllocator,
@@ -44,6 +43,7 @@ use winit_input_helper::WinitInputHelper;
 use crate::camera::Camera;
 use crate::hot_reload::HotReloadComputePipeline;
 use crate::model::Model;
+use crate::push_constants::{PushConstantsInput, build_push_constants};
 use crate::render_mode::RenderMode;
 use crate::rendering::{
     RenderContext, get_allocators, get_images_and_sets, get_swapchain_images, load_icon,
@@ -528,37 +528,11 @@ impl App {
                         rcx.recreate_swapchain = true;
                     }
                     let render_extent = rcx.render_image.extent();
-                    let pixel_to_ray = self.camera.pixel_to_ray_matrix();
-                    let size = self.voxel.voxel_resolution as f64;
-                    let mut scale_and_center = Matrix4::from_diagonal(&Vector4::from_element(size));
-                    scale_and_center.set_column(3, &Vector3::from_element(0.5 * size).push(1.0));
-                    let pixel_to_ray = scale_and_center * pixel_to_ray;
-                    #[derive(BufferContents)]
-                    #[repr(C)]
-                    struct PushConstants {
-                        pixel_to_ray: Matrix4<f32>,
-                        voxel_count: u32,
-                        render_mode: u32,
-                        _pad: [u32; 2],
-                        resolutions: [u32; 3],
-                    }
-                    // Clamp to 3 since shader only declares space for 3 grids now
-                    let voxel_count =
-                        self.voxel.active_voxel_grids.min(Model::ALL.len() as u32).max(1).min(3);
-                    let mut resolutions = [0u32; 3];
-                    for (i, r) in self.voxel.grid_resolutions.iter().take(3).enumerate() {
-                        resolutions[i] = *r;
-                    }
-                    if voxel_count as usize > self.voxel.grid_resolutions.len() {
-                        resolutions[0] = self.voxel.voxel_resolution;
-                    }
-                    let push_constants = PushConstants {
-                        pixel_to_ray: pixel_to_ray.cast(),
-                        voxel_count,
+                    let push_constants = build_push_constants(PushConstantsInput {
+                        cam_pixel_to_ray: self.camera.pixel_to_ray_matrix(),
+                        voxel: &self.voxel,
                         render_mode: self.render_mode as u32,
-                        _pad: [0, 0],
-                        resolutions,
-                    };
+                    });
                     let mut builder = AutoCommandBufferBuilder::primary(
                         self.command_buffer_allocator.clone(),
                         self.queue.queue_family_index(),
@@ -672,38 +646,11 @@ impl App {
         let resample_extent = rcx.resample_image.extent();
         self.camera.extent = [render_extent[0] as f64, render_extent[1] as f64];
 
-        let pixel_to_ray = self.camera.pixel_to_ray_matrix();
-
-        let size = self.voxel.voxel_resolution as f64;
-        let mut scale_and_center = Matrix4::from_diagonal(&Vector4::from_element(size));
-        scale_and_center.set_column(3, &Vector3::from_element(0.5 * size).push(1.0));
-        let pixel_to_ray = scale_and_center * pixel_to_ray;
-
-        #[derive(BufferContents)]
-        #[repr(C)]
-        struct PushConstants {
-            pixel_to_ray: Matrix4<f32>,
-            voxel_count: u32,
-            render_mode: u32,
-            _pad: [u32; 2],
-            resolutions: [u32; 3],
-        }
-        let effective_count =
-            self.voxel.active_voxel_grids.min(Model::ALL.len() as u32).max(1).min(3);
-        let mut res_arr = [0u32; 3];
-        for (i, r) in self.voxel.grid_resolutions.iter().take(3).enumerate() {
-            res_arr[i] = *r;
-        }
-        if effective_count as usize > self.voxel.grid_resolutions.len() {
-            res_arr[0] = self.voxel.voxel_resolution;
-        }
-        let push_constants = PushConstants {
-            pixel_to_ray: pixel_to_ray.cast(),
-            voxel_count: effective_count,
+        let push_constants = build_push_constants(PushConstantsInput {
+            cam_pixel_to_ray: self.camera.pixel_to_ray_matrix(),
+            voxel: &self.voxel,
             render_mode: self.render_mode as u32,
-            _pad: [0, 0],
-            resolutions: res_arr,
-        };
+        });
 
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
