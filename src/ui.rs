@@ -10,6 +10,8 @@ impl App {
     /// Draws all egui windows and mutates self state accordingly.
     /// Returns (request_regen_voxels, trigger_benchmark)
     pub(crate) fn draw_ui(&mut self) -> UiActions {
+        // Capture read-only stats before mutable borrows to avoid borrow conflicts
+        let current_fps = self.fps();
         // Safe unwrap: render() only calls this after rcx creation in resumed()
         let rcx_for_ui = self.rcx.as_mut().unwrap();
         let mut trigger_benchmark = false;
@@ -108,6 +110,7 @@ impl App {
                 }
             });
 
+            let fps_val = current_fps; // captured outside mutable borrow of self
             egui::Window::new("Stats").show(&ctx, |ui| {
                 fn format_with_commas(n: u64) -> String {
                     let mut s = n.to_string();
@@ -119,7 +122,7 @@ impl App {
                     s
                 }
 
-                ui.label(format!("FPS: {}", self.fps));
+                ui.label(format!("FPS: {}", fps_val));
 
                 let voxel_resolution = self.voxel.manager.voxel_resolution as u64;
                 ui.label(format!(

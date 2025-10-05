@@ -21,9 +21,6 @@ impl InputController {
     pub fn helper(&self) -> &WinitInputHelper {
         &self.helper
     }
-    pub fn helper_mut(&mut self) -> &mut WinitInputHelper {
-        &mut self.helper
-    }
 
     /// Process per-frame update: returns whether an exit was requested.
     pub fn update(&mut self, camera: &mut Camera, window: &Window) {
@@ -72,9 +69,6 @@ impl InputController {
     }
     pub fn end_step(&mut self) {
         self.helper.end_step();
-    }
-    pub fn close_requested(&self) -> bool {
-        self.helper.close_requested()
     }
     pub fn window_resized(&self) -> Option<(u32, u32)> {
         self.helper.window_resized().map(|ps| (ps.width, ps.height))

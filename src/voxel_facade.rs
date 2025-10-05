@@ -80,9 +80,4 @@ impl std::ops::DerefMut for VoxelSystem {
     }
 }
 
-impl VoxelSystem {
-    /// Forward cancel to inner manager for legacy call sites.
-    pub fn cancel(&mut self) {
-        self.manager.cancel();
-    }
-}
+// Legacy cancel forwarder removed; call self.manager.cancel() at call sites instead.
