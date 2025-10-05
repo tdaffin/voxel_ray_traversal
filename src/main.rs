@@ -1,14 +1,14 @@
 use winit::event_loop::EventLoop;
 
+mod app;
 mod camera;
 mod hot_reload;
 mod model;
 mod render_mode;
 mod rendering;
 mod voxel;
-mod voxelize;
 mod voxel_job;
-mod app;
+mod voxelize;
 use app::App;
 
 // RenderContext moved to rendering module

@@ -20,9 +20,7 @@ use vulkano::{
 };
 
 fn compile_to_spirv(
-    path: &Path,
-    kind: shaderc::ShaderKind,
-    entry_point_name: &str,
+    path: &Path, kind: shaderc::ShaderKind, entry_point_name: &str,
     defines: &[(String, Option<String>)],
 ) -> Result<shaderc::CompilationArtifact, shaderc::Error> {
     let mut f = File::open(path).unwrap();
@@ -64,8 +62,7 @@ fn get_pipeline(shader_module: Arc<ShaderModule>) -> Arc<ComputePipeline> {
         None,
         ComputePipelineCreateInfo::stage_layout(stage, layout),
     )
-    .unwrap()
-    ;
+    .unwrap();
     cp
 }
 
@@ -91,9 +88,7 @@ impl HotReloadComputePipeline {
     }
 
     pub fn with_defines(
-        device: Arc<Device>,
-        path: &Path,
-        defines: Vec<(String, Option<String>)>,
+        device: Arc<Device>, path: &Path, defines: Vec<(String, Option<String>)>,
     ) -> Self {
         let reload = Arc::<AtomicBool>::default();
         let cloned_reload = reload.clone();
@@ -109,13 +104,8 @@ impl HotReloadComputePipeline {
 
         watcher.watch(path, RecursiveMode::NonRecursive).unwrap();
 
-        let artifact = compile_to_spirv(
-            path,
-            shaderc::ShaderKind::Compute,
-            "main",
-            &defines,
-        )
-        .unwrap();
+        let artifact =
+            compile_to_spirv(path, shaderc::ShaderKind::Compute, "main", &defines).unwrap();
 
         let shader_module = unsafe {
             ShaderModule::new(device, ShaderModuleCreateInfo::new(artifact.as_binary())).unwrap()
@@ -133,8 +123,7 @@ impl HotReloadComputePipeline {
                 shaderc::ShaderKind::Compute,
                 "main",
                 &self.defines,
-            )
-            {
+            ) {
                 Ok(artifact) => artifact,
                 Err(e) => {
                     eprint!("{}", e);
@@ -155,14 +144,9 @@ impl HotReloadComputePipeline {
             let num_sets = self.pipeline.layout().set_layouts().len() as u32;
             let new_num_sets = new_pipeline.layout().set_layouts().len() as u32;
             if num_sets != new_num_sets
-                || !new_pipeline
-                    .layout()
-                    .is_compatible_with(self.pipeline.layout(), num_sets)
+                || !new_pipeline.layout().is_compatible_with(self.pipeline.layout(), num_sets)
             {
-                eprintln!(
-                    "{} layout is not compatible with pipeline.",
-                    self.path.display()
-                );
+                eprintln!("{} layout is not compatible with pipeline.", self.path.display());
                 return;
             }
 

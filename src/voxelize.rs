@@ -5,8 +5,8 @@ use ply_rs::{
     parser::Parser,
     ply::{Property, PropertyAccess},
 };
-use std::sync::{atomic::{AtomicBool, Ordering}};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 type Vec2 = Vector2<f32>;
 type Vec3 = Vector3<f32>;
@@ -20,22 +20,30 @@ pub struct VoxelProgressCallbacks<'a> {
 }
 
 pub fn ply_to_voxels_with_progress(
-    path: impl AsRef<Path>,
-    resolution: u32,
-    cb: VoxelProgressCallbacks,
+    path: impl AsRef<Path>, resolution: u32, cb: VoxelProgressCallbacks,
 ) -> Option<Vec<u128>> {
     let mut mesh = parse_ply(path);
-    if cb.cancelled.load(Ordering::Relaxed) { return None; }
+    if cb.cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
     transform_vertices(&mut mesh.vertices, resolution);
-    if cb.cancelled.load(Ordering::Relaxed) { return None; }
+    if cb.cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
     let voxels = voxelize_mesh_progress(&mesh, resolution, &cb);
-    if cb.cancelled.load(Ordering::Relaxed) { return None; }
+    if cb.cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
     Some(voxels)
 }
 
 pub fn ply_to_voxels(path: impl AsRef<Path>, resolution: u32) -> Vec<u128> {
-    ply_to_voxels_with_progress(path, resolution, VoxelProgressCallbacks { cancelled: &AtomicBool::new(false), progress: None })
-        .unwrap_or_default()
+    ply_to_voxels_with_progress(
+        path,
+        resolution,
+        VoxelProgressCallbacks { cancelled: &AtomicBool::new(false), progress: None },
+    )
+    .unwrap_or_default()
 }
 
 fn parse_ply(path: impl AsRef<Path>) -> Mesh {
@@ -92,14 +100,12 @@ fn parse_ply(path: impl AsRef<Path>) -> Mesh {
     for (_ignore_key, element) in &header.elements {
         match element.name.as_ref() {
             "vertex" => {
-                vertices = vertex_parser
-                    .read_payload_for_element(&mut reader, element, &header)
-                    .unwrap();
+                vertices =
+                    vertex_parser.read_payload_for_element(&mut reader, element, &header).unwrap();
             }
             "face" => {
-                triangles = face_parser
-                    .read_payload_for_element(&mut reader, element, &header)
-                    .unwrap();
+                triangles =
+                    face_parser.read_payload_for_element(&mut reader, element, &header).unwrap();
             }
             _ => panic!(),
         }
@@ -108,10 +114,7 @@ fn parse_ply(path: impl AsRef<Path>) -> Mesh {
     let vertices: Vec<Vec3> = bytemuck::cast_vec(vertices);
     let triangles: Vec<[i32; 3]> = bytemuck::cast_vec(triangles);
 
-    Mesh {
-        vertices,
-        triangles,
-    }
+    Mesh { vertices, triangles }
 }
 
 fn transform_vertices(vertices: &mut [Vec3], resolution: u32) {
@@ -139,17 +142,15 @@ fn transform_vertices(vertices: &mut [Vec3], resolution: u32) {
 // Each u128 is an rgba32ui on the GPU in a 3D texture.
 // Each texel is 4x4x8 voxels, and each channel is 1x4x8 voxels.
 
-fn voxelize_mesh_progress(
-    mesh: &Mesh,
-    resolution: u32,
-    cb: &VoxelProgressCallbacks,
-) -> Vec<u128> {
+fn voxelize_mesh_progress(mesh: &Mesh, resolution: u32, cb: &VoxelProgressCallbacks) -> Vec<u128> {
     let resolution = resolution as usize;
     let mut voxels = vec![0u128; resolution * resolution * resolution / 128];
     let total = mesh.triangles.len();
     let mut processed = 0usize;
     for triangle in &mesh.triangles {
-        if cb.cancelled.load(Ordering::Relaxed) { break; }
+        if cb.cancelled.load(Ordering::Relaxed) {
+            break;
+        }
         let a = &mesh.vertices[triangle[0] as usize];
         let b = &mesh.vertices[triangle[1] as usize];
         let c = &mesh.vertices[triangle[2] as usize];
@@ -160,11 +161,16 @@ fn voxelize_mesh_progress(
             voxels[texel] |= 1 << bit;
         });
         processed += 1;
-        if processed % 256 == 0 { // throttle callbacks
-            if let Some(p) = &cb.progress { p(processed, total); }
+        if processed % 256 == 0 {
+            // throttle callbacks
+            if let Some(p) = &cb.progress {
+                p(processed, total);
+            }
         }
     }
-    if let Some(p) = &cb.progress { p(processed, total); }
+    if let Some(p) = &cb.progress {
+        p(processed, total);
+    }
     voxels
 }
 
@@ -215,14 +221,7 @@ impl Helper {
             }
         }
 
-        Self {
-            min,
-            max,
-            n,
-            lower,
-            upper,
-            tests,
-        }
+        Self { min, max, n, lower, upper, tests }
     }
 
     fn visit_intersecting_voxels<F>(&self, mut f: F)

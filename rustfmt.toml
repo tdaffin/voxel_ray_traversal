@@ -1,0 +1,40 @@
+# Rustfmt configuration for voxel_ray_traversal
+# Docs: https://rust-lang.github.io/rustfmt/
+
+# Line width tuned for typical 1440p display and Vulkan-style chained builder calls.
+max_width = 100
+# Reorder imports deterministically.
+reorder_imports = true
+# Combine simple consecutive single-line expressions into one line when it aids brevity.
+use_small_heuristics = "Max"
+# Control how often rustfmt merges or breaks function signatures.
+fn_params_layout = "Compressed"
+# Edition (picked up automatically but we restate for clarity with nightly/CI).
+edition = "2024"
+# Control struct and enum field layout heuristics (leave default for balance).
+
+# NOTE: If using nightly rustfmt, you can consider enabling (requires +nightly):
+# unstable_features = true
+# format_code_in_doc_comments = true
+# imports_layout = "HorizontalVertical"
+
+# Format doc comments' line width.
+#wrap_comments = true
+#comment_width = 100
+# Keep spaces inside attributes minimal.
+#normalize_doc_attributes = true
+# Prefer vertical layout for long where clauses.
+#where_single_line = false
+# Keep imports grouped logically (std, extern, crate).
+#group_imports = "StdExternalCrate"
+# Avoid merging imports from different hierarchies when path clarity matters (especially useful with many 'vulkano::' segments).
+#merge_imports = false
+# Flatten and merge imports from the same crate for clarity.
+#imports_granularity = "Crate"
+# Ensure match arms with blocks are consistently indented.
+#match_arm_blocks = true
+# Retain a blank line between groups of imports and mod decls.
+#blank_lines_lower_bound = 0
+#blank_lines_upper_bound = 1
+# Force a trailing comma in multiline constructs for smaller diffs.
+#trailing_comma = "Vertical"

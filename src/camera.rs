@@ -9,12 +9,7 @@ pub struct Camera {
 
 impl Camera {
     pub fn new(position: Vector3<f64>, rotation: Vector3<f64>, extent: [f64; 2], fov: f64) -> Self {
-        Camera {
-            position,
-            rotation,
-            extent,
-            fov,
-        }
+        Camera { position, rotation, extent, fov }
     }
 
     pub fn look_direction(&mut self, direction: Vector3<f64>) {
