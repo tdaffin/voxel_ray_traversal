@@ -150,29 +150,29 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uint voxel_resolution, out 
 
     switch (pc.render_mode) {
         case COORD:
-    color = vec3(coord) / vec3(voxel_resolution - 1);
-        break;
+            color = vec3(coord) / vec3(voxel_resolution - 1);
+            break;
         case NORMAL:
-        vec3 normal = -mask * sgn_dir;
-        color = max(normal.xyz, 0) - min(normal.yxz + normal.zyx, 0);
-        break;
+            vec3 normal = -mask * sgn_dir;
+            color = max(normal.xyz, 0) - min(normal.yxz + normal.zyx, 0);
+            break;
         case UV:
-        vec3 hit = origin + dir * t_inside;
-        vec3 local_hit = hit - coord;
-        vec2 uv;
-        if (stepped_axis == 0) {
-            uv = local_hit.yz;
-        } else if (stepped_axis == 1) {
-            uv = local_hit.xz;
-        } else {
-            uv = local_hit.xy;
-        }
-        color = vec3(uv, 0);
-        break;
+            vec3 hit = origin + dir * t_inside;
+            vec3 local_hit = hit - coord;
+            vec2 uv;
+            if (stepped_axis == 0) {
+                uv = local_hit.yz;
+            } else if (stepped_axis == 1) {
+                uv = local_hit.xz;
+            } else {
+                uv = local_hit.xy;
+            }
+            color = vec3(uv, 0);
+            break;
         case DEPTH:
-        float depth = (tmin + t_inside) * length(dir);
-        color = vec3(1 / (1 + depth / voxel_resolution)) + vec3(0.3, 0.0, 0.7) / 256;
-        break;
+            float depth = (tmin + t_inside) * length(dir);
+            color = vec3(1 / (1 + depth / voxel_resolution)) + vec3(0.3, 0.0, 0.7) / 256;
+            break;
     }
     return true;
 }
@@ -187,7 +187,7 @@ void main() {
     ivec2 imageSize = imageSize(targetImage);
 
     if (any(greaterThanEqual(pixelCoord, imageSize)))
-    return;
+        return;
 
     vec3 ro = pc.pixelToRay[3].xyz;
     vec3 rd = mat3(pc.pixelToRay) * vec3(pixelCoord, 1);
@@ -198,7 +198,7 @@ void main() {
     float sizes[MAX_GRIDS];
     float cursor = 0.0;
     for (uint g = 0; g < gridCount; ++g) {
-    uint res = pc.resolutions[g];
+        uint res = pc.resolutions[g];
         float size = float(res);
         float spacing = size * 0.25;
         origins[g] = cursor;
@@ -262,7 +262,7 @@ void main() {
             if (abs(tmin - tEnter[order]) < 1e-5 && abs(tmax - tExit[order]) < 1e-5) { gridIdx = g; break; }
         }
         if (gridIdx < 0) continue; // shouldn't happen
-    uint vr = pc.resolutions[gridIdx];
+        uint vr = pc.resolutions[gridIdx];
         vec3 localOrigin = ro - vec3(origins[gridIdx], 0, 0);
         uint stepsBefore = steps;
         if (traversal(gridIdx, localOrigin, rd, vr, color, steps)) {
