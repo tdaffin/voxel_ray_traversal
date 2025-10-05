@@ -26,7 +26,7 @@ use vulkano::{
     },
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
     memory::allocator::StandardMemoryAllocator,
-    pipeline::{ComputePipeline, Pipeline, PipelineBindPoint},
+    pipeline::{Pipeline, PipelineBindPoint},
     swapchain::{Surface, SwapchainCreateInfo, SwapchainPresentInfo, acquire_next_image},
     sync::GpuFuture,
 };
@@ -487,154 +487,27 @@ impl App {
         }
 
         if trigger_benchmark {
-            use std::time::Instant;
-            let frames = 30u32;
-            let branching_pipe: Arc<ComputePipeline> = self.render_pipeline.clone();
-            let branchless_pipe: Arc<ComputePipeline> = self.render_pipeline_branchless.clone();
-            let mut run_variant = |pipe: Arc<ComputePipeline>| {
-                let mut total_cpu = Duration::ZERO;
-                let mut total_gpu_ns_accum: f64 = 0.0;
-                use vulkano::query::{QueryPool, QueryPoolCreateInfo, QueryResultFlags, QueryType};
-                use vulkano::sync::PipelineStage;
-                let timestamp_period = self.device.physical_device().properties().timestamp_period; // nanoseconds per tick (f32)
-                let supports_timestamps = self.device.physical_device().queue_family_properties()
-                    [self.queue.queue_family_index() as usize]
-                    .timestamp_valid_bits
-                    .is_some();
-                let query_pool = if supports_timestamps {
-                    Some(
-                        QueryPool::new(
-                            self.device.clone(),
-                            QueryPoolCreateInfo {
-                                query_count: frames * 2,
-                                ..QueryPoolCreateInfo::query_type(QueryType::Timestamp)
-                            },
-                        )
-                        .unwrap(),
-                    )
-                } else {
-                    None
-                };
-                for f in 0..frames {
-                    let rcx = self.rcx.as_mut().unwrap();
-                    let (image_index, suboptimal, acquire_future) =
-                        match acquire_next_image(rcx.swapchain.clone(), None)
-                            .map_err(Validated::unwrap)
-                        {
-                            Ok(r) => r,
-                            Err(_) => break,
-                        };
-                    if suboptimal {
-                        rcx.recreate_swapchain = true;
-                    }
-                    let render_extent = rcx.render_image.extent();
-                    let push_constants = build_push_constants(PushConstantsInput {
-                        cam_pixel_to_ray: self.camera.pixel_to_ray_matrix(),
-                        voxel: &self.voxel,
-                        render_mode: self.render_mode as u32,
-                    });
-                    let mut builder = AutoCommandBufferBuilder::primary(
-                        self.command_buffer_allocator.clone(),
-                        self.queue.queue_family_index(),
-                        CommandBufferUsage::OneTimeSubmit,
-                    )
-                    .unwrap();
-                    builder
-                        .clear_color_image(ClearColorImageInfo::image(rcx.render_image.clone()))
-                        .unwrap();
-                    if let Some(qp) = &query_pool {
-                        unsafe {
-                            builder
-                                .write_timestamp(qp.clone(), f * 2, PipelineStage::TopOfPipe)
-                                .unwrap();
-                        }
-                    }
-                    builder
-                        .bind_pipeline_compute(pipe.clone())
-                        .unwrap()
-                        .push_constants(pipe.layout().clone(), 0, push_constants)
-                        .unwrap()
-                        .bind_descriptor_sets(
-                            PipelineBindPoint::Compute,
-                            pipe.layout().clone(),
-                            0,
-                            vec![rcx.render_set.clone(), self.voxel.voxel_set.clone()],
-                        )
-                        .unwrap();
-                    unsafe {
-                        builder
-                            .dispatch([
-                                render_extent[0].div_ceil(8),
-                                render_extent[1].div_ceil(8),
-                                1,
-                            ])
-                            .unwrap();
-                    }
-                    if let Some(qp) = &query_pool {
-                        unsafe {
-                            builder
-                                .write_timestamp(qp.clone(), f * 2 + 1, PipelineStage::BottomOfPipe)
-                                .unwrap();
-                        }
-                    }
-                    let mut info = BlitImageInfo::images(
-                        rcx.render_image.clone(),
-                        rcx.image_views[image_index as usize].image().clone(),
-                    );
-                    info.filter = Filter::Nearest;
-                    builder.blit_image(info).unwrap();
-                    let command_buffer = builder.build().unwrap();
-                    let start = Instant::now();
-                    let future = acquire_future
-                        .then_execute(self.queue.clone(), command_buffer)
-                        .unwrap()
-                        .then_swapchain_present(
-                            self.queue.clone(),
-                            SwapchainPresentInfo::swapchain_image_index(
-                                rcx.swapchain.clone(),
-                                image_index,
-                            ),
-                        )
-                        .then_signal_fence_and_flush()
-                        .unwrap();
-                    future.wait(None).unwrap();
-                    total_cpu += start.elapsed();
-                }
-                // Fetch GPU timestamps if available
-                let avg_gpu_ns_opt = if let Some(qp) = &query_pool {
-                    if supports_timestamps {
-                        let mut data: Vec<u64> = vec![0; (frames * 2) as usize];
-                        qp.get_results(0..frames * 2, &mut data, QueryResultFlags::WAIT).unwrap();
-                        for f in 0..frames {
-                            let start = data[(f * 2) as usize];
-                            let end = data[(f * 2 + 1) as usize];
-                            if end > start {
-                                let ticks = (end - start) as f64;
-                                total_gpu_ns_accum += ticks * timestamp_period as f64;
-                            }
-                        }
-                        if total_gpu_ns_accum > 0.0 {
-                            Some((total_gpu_ns_accum / frames as f64) as u128)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                (total_cpu / frames, avg_gpu_ns_opt)
-            };
-            let (branching_cpu, branching_gpu) = run_variant(branching_pipe);
-            let (branchless_cpu, branchless_gpu) = run_variant(branchless_pipe);
-            println!("Benchmark Results ({} frames each):", frames);
-            println!("  Branching traversal avg frame CPU: {:?}", branching_cpu);
-            if let Some(ns) = branching_gpu {
+            use crate::benchmark::{BenchmarkContext, run};
+            let rcx_ref = self.rcx.as_mut().unwrap();
+            let outcome = run(&mut BenchmarkContext {
+                frames: 30,
+                camera: &self.camera,
+                voxel: &self.voxel,
+                render_mode: self.render_mode as u32,
+                branching_pipeline: self.render_pipeline.clone(),
+                branchless_pipeline: self.render_pipeline_branchless.clone(),
+                queue: self.queue.clone(),
+                command_buffer_allocator: self.command_buffer_allocator.clone(),
+                rcx: rcx_ref,
+                device: self.device.clone(),
+            });
+            println!("Benchmark Results ({} frames each):", outcome.frames);
+            println!("  Branching traversal avg frame CPU: {:?}", outcome.branching_cpu_avg);
+            if let Some(ns) = outcome.branching_gpu_avg_ns {
                 println!("  Branching traversal avg frame GPU: {:.3} ms", ns as f64 / 1_000_000.0);
             }
-            println!("  Branchless traversal avg frame CPU: {:?}", branchless_cpu);
-            if let Some(ns) = branchless_gpu {
+            println!("  Branchless traversal avg frame CPU: {:?}", outcome.branchless_cpu_avg);
+            if let Some(ns) = outcome.branchless_gpu_avg_ns {
                 println!("  Branchless traversal avg frame GPU: {:.3} ms", ns as f64 / 1_000_000.0);
             }
         }
