@@ -13,6 +13,7 @@ mod pipelines;
 mod push_constants;
 mod render_mode;
 mod rendering;
+mod swapchain_flow;
 mod swapchain_resources;
 mod ui;
 mod voxel;

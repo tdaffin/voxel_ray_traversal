@@ -4,9 +4,8 @@ use nalgebra::Vector3;
 use std::path::PathBuf;
 use std::sync::Arc;
 use vulkano::{
-    Validated, VulkanError,
     image::view::{ImageView, ImageViewCreateInfo},
-    swapchain::{Surface, SwapchainPresentInfo, acquire_next_image},
+    swapchain::Surface,
     sync::GpuFuture,
 };
 use winit::dpi::PhysicalSize;
@@ -142,21 +141,18 @@ impl App {
             );
         }
 
-        let (image_index, suboptimal, acquire_future) = {
+        let (image_index, acquire_future) = {
             let rcx = self.rcx.as_mut().unwrap();
-            match acquire_next_image(rcx.swapchain.clone(), None).map_err(Validated::unwrap) {
-                Ok(r) => r,
-                Err(VulkanError::OutOfDate) => {
-                    self.rcx.as_mut().unwrap().recreate_swapchain = true;
-                    return;
+            match crate::swapchain_flow::acquire_image(rcx) {
+                Some(r) => {
+                    if r.suboptimal {
+                        rcx.recreate_swapchain = true;
+                    }
+                    (r.image_index, r.future)
                 }
-                Err(e) => panic!("failed to acquire next image: {e}"),
+                None => return, // out of date -> will recreate next frame
             }
         };
-
-        if suboptimal {
-            self.rcx.as_mut().unwrap().recreate_swapchain = true;
-        }
 
         let (request_regen_voxels, trigger_benchmark) = self.draw_ui();
 
@@ -217,15 +213,7 @@ impl App {
         let gui_future =
             rcx.gui.draw_on_image(render_future, rcx.image_views[image_index as usize].clone());
 
-        gui_future
-            .then_swapchain_present(
-                self.gpu.queue.clone(),
-                SwapchainPresentInfo::swapchain_image_index(rcx.swapchain.clone(), image_index),
-            )
-            .then_signal_fence_and_flush()
-            .unwrap()
-            .wait(None)
-            .unwrap();
+        crate::swapchain_flow::present_and_wait(&self.gpu, rcx, image_index, gui_future);
     }
 }
 
