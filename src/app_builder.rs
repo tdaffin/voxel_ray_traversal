@@ -85,13 +85,18 @@ impl AppBuilder {
         );
         let future_grid_resolutions = voxel.manager.grid_resolutions.clone();
 
-        // Camera setup similar to previous logic
-        let res_f = 1.0f64;
-        let spacing = res_f * 0.25; // matches shader
-        let stride = res_f + spacing;
-        let target = Vector3::new(stride, res_f * 0.5, res_f * 0.5);
-        let total_width = 2.0 * stride + res_f;
-        let dist = total_width * 1.2;
+        // Camera setup: derive layout from number of active grids (initially all models voxelize eventually)
+        let grid_count = Model::ALL.len() as f64; // approximate upper bound; actual active may be fewer early
+        let base_res = 1.0f64; // normalized unit size per grid before scaling by its own resolution in shader math
+        let spacing_scale = 0.25; // must match shader spacing ratio
+        let spacing = base_res * spacing_scale;
+        let stride = base_res + spacing;
+        let total_width = (grid_count - 1.0) * (base_res + spacing) + base_res;
+        // Focus roughly on second grid (gives a pleasing angle when more than one present)
+        let focus_index = (grid_count.min(2.0) - 1.0).max(0.0);
+        let target_x = focus_index * stride + base_res * 0.5;
+        let target = Vector3::new(target_x, base_res * 0.5, base_res * 0.5);
+        let dist = total_width * 1.1; // scale distance by total span
         let cam_pos = target + Vector3::new(-dist, dist * 0.6, dist * 0.8);
         let mut camera =
             Camera::new(cam_pos, Vector3::zeros(), self.window_resolution.into(), self.camera_fov);

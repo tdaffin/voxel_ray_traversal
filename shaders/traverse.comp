@@ -17,8 +17,8 @@ layout(push_constant) uniform PushConstants {
     uint voxel_count;
     uint render_mode;
     uvec2 _pad; // alignment padding
-    uvec3 resolutions; // per-grid resolutions (only first voxel_count used)
-    uint _pad2; // keep 16-byte alignment
+    uvec4 resolutions; // per-grid resolutions (only first voxel_count used)
+    uvec3 _pad2; // padding to match Rust layout (size = 124 bytes total)
 } pc;
 
 layout(set = 0, binding = 0, rgba8) writeonly uniform image2D targetImage;
@@ -322,7 +322,7 @@ void main() {
         }
     }
     // We lost which grid index each tEnter belonged to; recompute by matching tEnter.
-    // Since there are only 3, brute force map when needed.
+    // Grid count is small (<= 4 currently), so brute force mapping is fine.
     vec3 color = vec3(0);
     uint steps = 0;
     bool hit = false;

@@ -104,7 +104,15 @@ impl VoxelManager {
             let base_palette_index = (idx as u32 * (256 / Model::ALL.len() as u32)) as u8;
             // Each model gets a contiguous 16-color sub-range (low nibble variation added during voxel write).
             thread::spawn(move || {
-                let (vox, colors) = voxelize::ply_to_voxels(path, res, base_palette_index);
+                let (vox, colors) = if path.extension().and_then(|e| e.to_str()) == Some("vox") {
+                    if let Some((v, c)) = crate::voxelize_vox::vox_to_voxels(&path, res) {
+                        (v, c)
+                    } else {
+                        (vec![0u128; (res as usize).pow(3) / 128], vec![0u8; (res as usize).pow(3)])
+                    }
+                } else {
+                    voxelize::ply_to_voxels(&path, res, base_palette_index)
+                };
                 let _ = txc.send(VoxelJobMessage::Finished {
                     generation: generation_id,
                     index: idx,
@@ -301,21 +309,42 @@ impl VoxelManager {
                         }
                     })),
                 };
-                if let Some((vox, colors)) =
-                    ply_to_voxels_with_progress(path, res_for_grid, base_palette_index, prog_cb)
-                {
-                    if !cancelled.load(Ordering::Relaxed) {
-                        let _ = txc.send(VoxelJobMessage::Finished {
-                            generation: gen_thread,
-                            index: idx,
-                            data: vox,
-                            colors,
-                        });
+                if path.extension().and_then(|e| e.to_str()) == Some("vox") {
+                    // No progress callbacks for .vox yet
+                    if let Some((vox, colors)) =
+                        crate::voxelize_vox::vox_to_voxels(&path, res_for_grid)
+                    {
+                        if !cancelled.load(Ordering::Relaxed) {
+                            let _ = txc.send(VoxelJobMessage::Finished {
+                                generation: gen_thread,
+                                index: idx,
+                                data: vox,
+                                colors,
+                            });
+                        }
                     } else {
                         let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
                     }
                 } else {
-                    let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
+                    if let Some((vox, colors)) = ply_to_voxels_with_progress(
+                        &path,
+                        res_for_grid,
+                        base_palette_index,
+                        prog_cb,
+                    ) {
+                        if !cancelled.load(Ordering::Relaxed) {
+                            let _ = txc.send(VoxelJobMessage::Finished {
+                                generation: gen_thread,
+                                index: idx,
+                                data: vox,
+                                colors,
+                            });
+                        } else {
+                            let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
+                        }
+                    } else {
+                        let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
+                    }
                 }
             });
         }
