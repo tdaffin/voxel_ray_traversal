@@ -1,7 +1,4 @@
-use egui_winit_vulkano::{
-    Gui, GuiConfig,
-    egui::{self, Color32},
-};
+use egui_winit_vulkano::{Gui, GuiConfig};
 use nalgebra::Vector3;
 use std::path::PathBuf;
 use std::{
@@ -58,29 +55,29 @@ pub struct App {
     device: Arc<Device>,
     queue: Arc<Queue>,
 
-    memory_allocator: Arc<StandardMemoryAllocator>,
-    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    pub(crate) memory_allocator: Arc<StandardMemoryAllocator>,
+    pub(crate) descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
 
-    render_pipeline: HotReloadComputePipeline,
-    resample_pipeline: HotReloadComputePipeline,
+    pub(crate) render_pipeline: HotReloadComputePipeline,
+    pub(crate) resample_pipeline: HotReloadComputePipeline,
     render_pipeline_branchless: HotReloadComputePipeline,
     // Voxel subsystem
-    voxel: VoxelManager,
-    future_grid_resolutions: Vec<u32>,
-    model: Model,
+    pub(crate) voxel: VoxelManager,
+    pub(crate) future_grid_resolutions: Vec<u32>,
+    pub(crate) model: Model,
 
-    camera: Camera,
-    render_mode: RenderMode,
-    render_scale: f32,
+    pub(crate) camera: Camera,
+    pub(crate) render_mode: RenderMode,
+    pub(crate) render_scale: f32,
 
     input: WinitInputHelper,
     focused: bool,
     last_second: Instant,
     frames_since_last_second: u32,
-    fps: u32,
+    pub(crate) fps: u32,
 
-    rcx: Option<RenderContext>,
+    pub(crate) rcx: Option<RenderContext>,
 }
 
 impl App {
@@ -341,138 +338,8 @@ impl App {
             self.rcx.as_mut().unwrap().recreate_swapchain = true;
         }
 
-        let mut trigger_benchmark = false;
-        let rcx_for_ui = self.rcx.as_mut().unwrap();
-        // Defer actions requiring &mut self after UI closure to avoid borrow conflicts.
-        let mut request_regen_voxels = false;
-        rcx_for_ui.gui.immediate_ui(|gui| {
-            let ctx = gui.context();
+        let (request_regen_voxels, trigger_benchmark) = self.draw_ui();
 
-            egui::Window::new("Settings").show(&ctx, |ui| {
-                ui.style_mut().spacing.slider_width = 250.0;
-                ui.horizontal(|ui| {
-                    for &mode in RenderMode::ALL {
-                        ui.selectable_value(&mut self.render_mode, mode, format!("{:?}", mode));
-                    }
-                });
-                ui.separator();
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.voxel.active_voxel_grids,
-                        1..=Model::ALL.len() as u32,
-                    )
-                    .text("Active Grids"),
-                );
-                if ui.button("Benchmark Traversal Variants").clicked() {
-                    trigger_benchmark = true;
-                }
-                ui.add(egui::Slider::new(&mut self.camera.fov, 0.0..=180.0).text("FOV"));
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.render_scale, 0.125..=8.0).text("Render Scale"),
-                    )
-                    .changed()
-                {
-                    let window_extent: [u32; 2] = rcx_for_ui.window.inner_size().into();
-                    let render_extent = [
-                        (window_extent[0] as f32 * self.render_scale) as u32,
-                        (window_extent[1] as f32 * self.render_scale) as u32,
-                    ];
-                    (
-                        rcx_for_ui.render_image,
-                        rcx_for_ui.render_set,
-                        rcx_for_ui.resample_image,
-                        rcx_for_ui.resample_set,
-                    ) = get_images_and_sets(
-                        self.memory_allocator.clone(),
-                        self.descriptor_set_allocator.clone(),
-                        &self.render_pipeline,
-                        &self.resample_pipeline,
-                        render_extent,
-                        window_extent,
-                    );
-                }
-
-                ui.colored_label(
-                    Color32::LIGHT_RED,
-                    "Warning: Very high resolutions may exhaust GPU memory.",
-                );
-                ui.label("Each grid can now have its own resolution (multiple of 8).");
-                for i in 0..self.future_grid_resolutions.len() {
-                    let mut val = self.future_grid_resolutions[i];
-                    let label = format!("Grid {i} Res");
-                    if ui.add(egui::Slider::new(&mut val, 8..=4096).text(label)).changed() {
-                        val = val.div_ceil(8) * 8;
-                        self.future_grid_resolutions[i] = val;
-                    }
-                }
-                ui.horizontal(|ui| {
-                    for &model in Model::ALL {
-                        ui.selectable_value(&mut self.model, model, format!("{:?}", model));
-                    }
-                });
-                if ui.button("Regenerate Grids").clicked() {
-                    request_regen_voxels = true;
-                }
-                if ui.button("Cancel Voxelization").clicked() {
-                    self.voxel.cancel();
-                }
-                ui.separator();
-                // Progress overview
-                let total = self.voxel.voxel_pending.len();
-                let remaining = self.voxel.voxel_pending.iter().filter(|b| **b).count();
-                ui.label(format!("Voxelization: {} / {} finished", total - remaining, total));
-                for (i, (done, total_tris)) in self.voxel.voxel_progress.iter().enumerate() {
-                    let (d, t) = (*done, *total_tris);
-                    let pct = if t > 0 { (d as f32 / t as f32 * 100.0).min(100.0) } else { 0.0 };
-                    let status = if self.voxel.voxel_pending[i] {
-                        if t > 0 { format!("{pct:.1}%") } else { "…".into() }
-                    } else {
-                        "✓".into()
-                    };
-                    ui.label(format!("Grid {i}: {status}"));
-                }
-            });
-            egui::Window::new("Stats").show(&ctx, |ui| {
-                fn format_with_commas(n: u64) -> String {
-                    let mut s = n.to_string();
-
-                    let mut i = 3;
-                    while i < s.len() {
-                        s.insert(s.len() - i, ',');
-                        i += 4;
-                    }
-
-                    s
-                }
-
-                ui.label(format!("FPS: {}", self.fps));
-
-                let voxel_resolution = self.voxel.voxel_resolution as u64;
-                ui.label(format!(
-                    "Voxels: {}³ = {}",
-                    format_with_commas(voxel_resolution),
-                    format_with_commas(voxel_resolution.pow(3))
-                ));
-                let window_extent: [u32; 2] = rcx_for_ui.window.inner_size().into();
-                let render_extent = [
-                    (window_extent[0] as f32 * self.render_scale) as u32,
-                    (window_extent[1] as f32 * self.render_scale) as u32,
-                ];
-                ui.label(format!(
-                    "Pixels: {}×{} = {}",
-                    format_with_commas(window_extent[0] as u64),
-                    format_with_commas(window_extent[1] as u64),
-                    format_with_commas((window_extent[0] * window_extent[1]) as u64)
-                ));
-                ui.label(format!(
-                    "Rays: {}×{} = {}",
-                    format_with_commas(render_extent[0] as u64),
-                    format_with_commas(render_extent[1] as u64),
-                    format_with_commas((render_extent[0] * render_extent[1]) as u64)
-                ));
-            });
-        });
         if request_regen_voxels {
             // Copy future per-grid resolutions into active ones (truncate/extend safely)
             self.voxel.future_grid_resolutions = self.future_grid_resolutions.clone();

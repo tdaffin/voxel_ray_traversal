@@ -8,6 +8,7 @@ mod model;
 mod push_constants;
 mod render_mode;
 mod rendering;
+mod ui;
 mod voxel;
 mod voxel_job;
 mod voxelize;
