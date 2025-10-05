@@ -1,7 +1,5 @@
 use crate::input_controller::InputController;
 use egui_winit_vulkano::{Gui, GuiConfig};
-use nalgebra::Vector3;
-use std::path::PathBuf;
 use std::sync::Arc;
 use vulkano::{
     image::view::{ImageView, ImageViewCreateInfo},
@@ -15,7 +13,6 @@ use winit::{
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Window, WindowId},
 };
-use winit_input_helper::WinitInputHelper;
 
 use crate::camera::Camera;
 use crate::frame_timer::FrameTimer;
@@ -23,13 +20,13 @@ use crate::gpu::GpuContext;
 use crate::model::Model;
 use crate::pipelines::PipelineManager;
 // push_constants now handled inside frame_renderer
+use crate::app_builder::AppBuilder;
 use crate::frame_renderer::record_frame;
 use crate::render_mode::RenderMode;
 use crate::rendering::{RenderContext, get_images_and_sets, get_swapchain_images, load_icon};
 use crate::swapchain_manager::SwapchainManager;
 use crate::voxel_facade::VoxelSystem;
 
-const INITIAL_VOXEL_RESOLUTION: u32 = 24;
 const INITIAL_WINDOW_RESOLUTION: PhysicalSize<u32> = PhysicalSize::new(960, 960);
 
 pub struct App {
@@ -53,51 +50,17 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(event_loop: &EventLoop<()>) -> Self {
-        let gpu = GpuContext::new(event_loop);
-
-        let shaders_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
-        let pipelines = PipelineManager::new(gpu.device.clone(), &shaders_dir);
-
-        let voxel = VoxelSystem::new(
-            INITIAL_VOXEL_RESOLUTION,
-            gpu.memory_allocator.clone(),
-            gpu.descriptor_set_allocator.clone(),
-            gpu.command_buffer_allocator.clone(),
-            gpu.queue.clone(),
-            &pipelines.render,
-        );
-        let future_grid_resolutions = voxel.manager.grid_resolutions.clone();
-        let model = Model::Bunny;
-
-        let input = InputController::new(WinitInputHelper::new());
-
-        // Camera setup to frame all three grids.
-        let res_f = 1.0f64;
-        let spacing = res_f * 0.25; // matches shader
-        let stride = res_f + spacing;
-        let target = Vector3::new(stride, res_f * 0.5, res_f * 0.5);
-        let total_width = 2.0 * stride + res_f;
-        let dist = total_width * 1.2;
-        let cam_pos = target + Vector3::new(-dist, dist * 0.6, dist * 0.8);
-        let mut camera =
-            Camera::new(cam_pos, Vector3::zeros(), INITIAL_WINDOW_RESOLUTION.into(), 35.0);
-        camera.look_at(target);
-
-        App {
-            gpu,
-            pipelines,
-            voxel,
-            future_grid_resolutions,
-            model,
-            camera,
-            render_mode: RenderMode::Coord,
-            render_scale: 1.0,
-            input,
-            frame_timer: FrameTimer::new(),
-            fps: 0,
-            rcx: None,
+    pub(crate) fn from_parts(
+        gpu: GpuContext, pipelines: PipelineManager, voxel: VoxelSystem,
+        future_grid_resolutions: Vec<u32>, model: Model, camera: Camera, render_mode: RenderMode,
+        render_scale: f32, input: InputController, frame_timer: FrameTimer,
+    ) -> Self {
+        App { gpu, pipelines, voxel, future_grid_resolutions, model, camera, render_mode,
+            render_scale, input, frame_timer, fps: 0, rcx: None,
         }
+    }
+    pub fn new(event_loop: &EventLoop<()>) -> Self {
+        AppBuilder::default().build(event_loop)
     }
 
     // start_background_voxelization now handled by VoxelManager
@@ -153,30 +116,17 @@ impl App {
         }
 
         if trigger_benchmark {
-            crate::benchmark_hook::run_bench_if_requested(
-                true,
-                30,
-                &self.camera,
-                &self.voxel.manager,
-                self.render_mode as u32,
-                &self.pipelines,
-                self.gpu.queue.clone(),
-                self.gpu.command_buffer_allocator.clone(),
-                self.rcx.as_mut().unwrap(),
-                self.gpu.device.clone(),
+            crate::benchmark_hook::run_bench_if_requested(true, 30, &self.camera,
+                &self.voxel.manager, self.render_mode as u32, &self.pipelines,
+                self.gpu.queue.clone(), self.gpu.command_buffer_allocator.clone(),
+                self.rcx.as_mut().unwrap(), self.gpu.device.clone(),
             );
         }
 
         // Build command buffer via renderer helper
         let rcx = self.rcx.as_mut().unwrap();
-        let outputs = record_frame(
-            &self.gpu,
-            &self.pipelines,
-            rcx,
-            &self.voxel.manager,
-            &mut self.camera,
-            self.render_mode as u32,
-            image_index,
+        let outputs = record_frame(&self.gpu, &self.pipelines, rcx,
+            &self.voxel.manager, &mut self.camera, self.render_mode as u32, image_index,
         );
 
         let render_future =
@@ -223,29 +173,15 @@ impl ApplicationHandler for App {
             window_extent,
         );
 
-        let gui = Gui::new(
-            event_loop,
-            surface,
-            self.gpu.queue.clone(),
-            swapchain.image_format(),
+        let gui = Gui::new(event_loop, surface, self.gpu.queue.clone(),
+            swapchain.image_format(), 
             GuiConfig { is_overlay: true, ..Default::default() },
         );
 
         let recreate_swapchain = false;
 
-        self.rcx = Some(RenderContext {
-            window,
-            swapchain,
-            image_views,
-
-            render_image,
-            render_set,
-            resample_image,
-            resample_set,
-
-            gui,
-
-            recreate_swapchain,
+        self.rcx = Some(RenderContext { window, swapchain, image_views, render_image, render_set,
+            resample_image, resample_set, gui, recreate_swapchain,
         });
     }
 

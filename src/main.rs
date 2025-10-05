@@ -1,6 +1,7 @@
 use winit::event_loop::EventLoop;
 
 mod app;
+mod app_builder;
 mod benchmark;
 mod benchmark_hook;
 mod camera;
