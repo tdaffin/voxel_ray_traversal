@@ -2,6 +2,7 @@ use winit::event_loop::EventLoop;
 
 mod app;
 mod benchmark;
+mod benchmark_hook;
 mod camera;
 mod frame_renderer;
 mod frame_timer;

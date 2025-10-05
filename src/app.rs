@@ -170,29 +170,18 @@ impl App {
         }
 
         if trigger_benchmark {
-            use crate::benchmark::{BenchmarkContext, run};
-            let rcx_ref = self.rcx.as_mut().unwrap();
-            let outcome = run(&mut BenchmarkContext {
-                frames: 30,
-                camera: &self.camera,
-                voxel: &self.voxel,
-                render_mode: self.render_mode as u32,
-                branching_pipeline: self.pipelines.render.clone(),
-                branchless_pipeline: self.pipelines.render_branchless.clone(),
-                queue: self.gpu.queue.clone(),
-                command_buffer_allocator: self.gpu.command_buffer_allocator.clone(),
-                rcx: rcx_ref,
-                device: self.gpu.device.clone(),
-            });
-            println!("Benchmark Results ({} frames each):", outcome.frames);
-            println!("  Branching traversal avg frame CPU: {:?}", outcome.branching_cpu_avg);
-            if let Some(ns) = outcome.branching_gpu_avg_ns {
-                println!("  Branching traversal avg frame GPU: {:.3} ms", ns as f64 / 1_000_000.0);
-            }
-            println!("  Branchless traversal avg frame CPU: {:?}", outcome.branchless_cpu_avg);
-            if let Some(ns) = outcome.branchless_gpu_avg_ns {
-                println!("  Branchless traversal avg frame GPU: {:.3} ms", ns as f64 / 1_000_000.0);
-            }
+            crate::benchmark_hook::run_bench_if_requested(
+                true,
+                30,
+                &self.camera,
+                &self.voxel,
+                self.render_mode as u32,
+                &self.pipelines,
+                self.gpu.queue.clone(),
+                self.gpu.command_buffer_allocator.clone(),
+                self.rcx.as_mut().unwrap(),
+                self.gpu.device.clone(),
+            );
         }
 
         // Build command buffer via renderer helper
