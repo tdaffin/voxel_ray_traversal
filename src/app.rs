@@ -26,6 +26,7 @@ use crate::pipelines::PipelineManager;
 use crate::frame_renderer::record_frame;
 use crate::render_mode::RenderMode;
 use crate::rendering::{RenderContext, get_images_and_sets, get_swapchain_images, load_icon};
+use crate::swapchain_manager::SwapchainManager;
 use crate::voxel_facade::VoxelSystem;
 
 const INITIAL_VOXEL_RESOLUTION: u32 = 24;
@@ -127,24 +128,19 @@ impl App {
             if rcx.window.inner_size().width == 0 || rcx.window.inner_size().height == 0 {
                 return;
             }
-            crate::swapchain_resources::ensure_swapchain_resources(
-                rcx,
-                &self.gpu,
-                &self.pipelines,
-                self.render_scale,
-            );
+            SwapchainManager::ensure_resources(rcx, &self.gpu, &self.pipelines, self.render_scale);
         }
 
         let (image_index, acquire_future) = {
             let rcx = self.rcx.as_mut().unwrap();
-            match crate::swapchain_flow::acquire_image(rcx) {
+            match SwapchainManager::acquire(rcx) {
                 Some(r) => {
                     if r.suboptimal {
                         rcx.recreate_swapchain = true;
                     }
                     (r.image_index, r.future)
                 }
-                None => return, // out of date -> will recreate next frame
+                None => return,
             }
         };
 
@@ -189,7 +185,7 @@ impl App {
         let gui_future =
             rcx.gui.draw_on_image(render_future, rcx.image_views[image_index as usize].clone());
 
-        crate::swapchain_flow::present_and_wait(&self.gpu, rcx, image_index, gui_future);
+        SwapchainManager::present_and_wait(&self.gpu, rcx, image_index, gui_future);
     }
 }
 
