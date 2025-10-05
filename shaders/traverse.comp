@@ -1,12 +1,13 @@
 #version 460
 #extension GL_EXT_nonuniform_qualifier : require
 
-// Has to match the order of the RenderMode enum in main.rs
+// Render modes: MUST stay in sync with the Rust RenderMode enum (search for RenderMode in main.rs or related file)
 const uint COORD = 0;
 const uint STEPS = 1;
 const uint NORMAL = 2;
 const uint UV = 3;
 const uint DEPTH = 4;
+const uint SHADE = 5; // New: shaded lighting + simple AO (update host RenderMode enum accordingly)
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -172,6 +173,73 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uint voxel_resolution, out 
         case DEPTH:
             float depth = (tmin + t_inside) * length(dir);
             color = vec3(1 / (1 + depth / voxel_resolution)) + vec3(0.3, 0.0, 0.7) / 256;
+            break;
+        case SHADE:
+            // Shaded lighting + approximate ambient occlusion inspired by provided Rust snippet.
+            // Assumptions:
+            // - No per-voxel stored color yet, so treat voxel as white (1,1,1).
+            // - Fixed directional light (can be moved to push constants later if needed).
+            // - AO considers orthogonal neighbor occupancy around the stepped neighbor cell.
+            // - Uses the traversed normal derived above (same as NORMAL case logic) and mixes with a simple depth term.
+            {
+                vec3 voxel_base_color = vec3(1.0); // placeholder for future voxel material/color
+                // Reconstruct surface normal (same as NORMAL case):
+                vec3 normal = -mask * sgn_dir;
+                // Normalize (should already be unit length along axis, but keep for safety if logic changes):
+                normal = normalize(normal);
+                // Light direction (pointing from surface towards light). Choose something slightly off-axis for contrast.
+                vec3 light_dir = normalize(vec3(0.5, 0.8, 0.3));
+                float ndotl = clamp(dot(normal, light_dir), -1.0, 1.0);
+                float diff = (ndotl + 1.0) * 0.5; // map [-1,1] to [0,1]
+
+                // Approximate AO: sample neighbor voxels around the neighbor cell in directions perpendicular to the step direction.
+                // Determine neighbor cell (nbr) one step forward along stepped axis inside the voxel grid if valid.
+                uvec3 base_coord = coord; // impact voxel
+                uvec3 nbr = coord;
+                if (stepped_axis == 0) nbr.x = min(nbr.x + (uint(sgn_dir.x > 0.0)), voxel_resolution - 1);
+                if (stepped_axis == 1) nbr.y = min(nbr.y + (uint(sgn_dir.y > 0.0)), voxel_resolution - 1);
+                if (stepped_axis == 2) nbr.z = min(nbr.z + (uint(sgn_dir.z > 0.0)), voxel_resolution - 1);
+
+                // Direction vector dir = nbr - base in integer space:
+                ivec3 idir = ivec3(nbr) - ivec3(base_coord);
+                int dAxis = 0;
+                if (abs(idir.y) > 0) dAxis = 1; else if (abs(idir.z) > 0) dAxis = 2;
+
+                // Offsets to probe along perpendicular axes (like OFFS in Rust). Here choose {-1, +1}.
+                int OFFS[2] = int[2](-1, 1);
+                int occ = 0;
+                int probes = 0;
+                for (int ax = 0; ax < 3; ++ax) {
+                    if (ax == dAxis) continue; // perpendicular only
+                    for (int oi = 0; oi < 2; ++oi) {
+                        ivec3 p = ivec3(nbr);
+                        if (ax == 0) p.x += OFFS[oi];
+                        if (ax == 1) p.y += OFFS[oi];
+                        if (ax == 2) p.z += OFFS[oi];
+                        // Bounds check
+                        if (p.x < 0 || p.y < 0 || p.z < 0 || p.x >= int(voxel_resolution) || p.y >= int(voxel_resolution) || p.z >= int(voxel_resolution))
+                            continue;
+                        // Read occupancy (reuse helper logic):
+                        uvec3 q = uvec3(p);
+                        // We need a fresh texel cache for arbitrary coords:
+                        uvec4 texAO; ivec3 texAOcoord = ivec3(-1);
+                        if (readVoxel(q, texAO, texAOcoord, gridIndex)) {
+                            occ++;
+                        }
+                        probes++;
+                    }
+                }
+                float ao = 1.0 - float(occ) * 0.2; // matches multiplier pattern in Rust snippet
+                ao = clamp(ao, 0.0, 1.0);
+                float c = diff * ao;
+
+                // Depth weighting: reuse same depth notion as DEPTH (approx distance from entry point)
+                float depth = (tmin + t_inside) * length(dir);
+                float depth_term = (1.0 / (1.0 + depth / voxel_resolution));
+                // Combine similar to rust: c = c*0.6 + spos[2]*0.4, approximate spos.z with normalized depth term.
+                c = c * 0.6 + depth_term * 0.4;
+                color = voxel_base_color * c;
+            }
             break;
     }
     return true;
