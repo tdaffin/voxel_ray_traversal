@@ -26,7 +26,7 @@ use crate::pipelines::PipelineManager;
 use crate::frame_renderer::record_frame;
 use crate::render_mode::RenderMode;
 use crate::rendering::{RenderContext, get_images_and_sets, get_swapchain_images, load_icon};
-use crate::voxel_job::VoxelManager;
+use crate::voxel_facade::VoxelSystem;
 
 const INITIAL_VOXEL_RESOLUTION: u32 = 24;
 const INITIAL_WINDOW_RESOLUTION: PhysicalSize<u32> = PhysicalSize::new(960, 960);
@@ -36,7 +36,7 @@ pub struct App {
 
     pub(crate) pipelines: PipelineManager,
     // Voxel subsystem
-    pub(crate) voxel: VoxelManager,
+    pub(crate) voxel: VoxelSystem,
     pub(crate) future_grid_resolutions: Vec<u32>,
     pub(crate) model: Model,
 
@@ -58,7 +58,7 @@ impl App {
         let shaders_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
         let pipelines = PipelineManager::new(gpu.device.clone(), &shaders_dir);
 
-        let voxel = VoxelManager::new(
+        let voxel = VoxelSystem::new(
             INITIAL_VOXEL_RESOLUTION,
             gpu.memory_allocator.clone(),
             gpu.descriptor_set_allocator.clone(),
@@ -66,7 +66,7 @@ impl App {
             gpu.queue.clone(),
             &pipelines.render,
         );
-        let future_grid_resolutions = voxel.grid_resolutions.clone();
+        let future_grid_resolutions = voxel.manager.grid_resolutions.clone();
         let model = Model::Bunny;
 
         let input = InputController::new(WinitInputHelper::new());
@@ -113,13 +113,7 @@ impl App {
         // Update input (camera movement, focus toggles)
         self.input.update(&mut self.camera, &rcx.window);
         // Drain any completed voxelization results and upload to GPU
-        self.voxel.poll(
-            self.gpu.descriptor_set_allocator.clone(),
-            &self.pipelines.render,
-            self.gpu.memory_allocator.clone(),
-            self.gpu.command_buffer_allocator.clone(),
-            self.gpu.queue.clone(),
-        );
+        self.voxel.poll(&self.pipelines.render);
     }
 
     fn render(&mut self, _event_loop: &ActiveEventLoop) {
@@ -158,15 +152,8 @@ impl App {
 
         if request_regen_voxels {
             // Copy future per-grid resolutions into active ones (truncate/extend safely)
-            self.voxel.future_grid_resolutions = self.future_grid_resolutions.clone();
-            self.voxel.regenerate(
-                self.gpu.descriptor_set_allocator.clone(),
-                self.gpu.memory_allocator.clone(),
-                self.gpu.command_buffer_allocator.clone(),
-                self.gpu.queue.clone(),
-                &self.pipelines.render,
-                8,
-            );
+            self.voxel.manager.future_grid_resolutions = self.future_grid_resolutions.clone();
+            self.voxel.regenerate(&self.pipelines.render, 8);
         }
 
         if trigger_benchmark {
@@ -174,7 +161,7 @@ impl App {
                 true,
                 30,
                 &self.camera,
-                &self.voxel,
+                &self.voxel.manager,
                 self.render_mode as u32,
                 &self.pipelines,
                 self.gpu.queue.clone(),
@@ -190,7 +177,7 @@ impl App {
             &self.gpu,
             &self.pipelines,
             rcx,
-            &self.voxel,
+            &self.voxel.manager,
             &mut self.camera,
             self.render_mode as u32,
             image_index,

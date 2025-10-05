@@ -18,6 +18,7 @@ mod swapchain_flow;
 mod swapchain_resources;
 mod ui;
 mod voxel;
+mod voxel_facade;
 mod voxel_job;
 mod voxelize;
 use app::App;

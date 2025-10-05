@@ -29,7 +29,7 @@ impl App {
                 ui.separator();
                 ui.add(
                     egui::Slider::new(
-                        &mut self.voxel.active_voxel_grids,
+                        &mut self.voxel.manager.active_voxel_grids,
                         1..=Model::ALL.len() as u32,
                     )
                     .text("Active Grids"),
@@ -88,17 +88,18 @@ impl App {
                     request_regen_voxels = true;
                 }
                 if ui.button("Cancel Voxelization").clicked() {
-                    self.voxel.cancel();
+                    self.voxel.manager.cancel();
                 }
                 ui.separator();
                 // Progress overview
-                let total = self.voxel.voxel_pending.len();
-                let remaining = self.voxel.voxel_pending.iter().filter(|b| **b).count();
+                let total = self.voxel.manager.voxel_pending.len();
+                let remaining = self.voxel.manager.voxel_pending.iter().filter(|b| **b).count();
                 ui.label(format!("Voxelization: {} / {} finished", total - remaining, total));
-                for (i, (done, total_tris)) in self.voxel.voxel_progress.iter().enumerate() {
+                for (i, (done, total_tris)) in self.voxel.manager.voxel_progress.iter().enumerate()
+                {
                     let (d, t) = (*done, *total_tris);
                     let pct = if t > 0 { (d as f32 / t as f32 * 100.0).min(100.0) } else { 0.0 };
-                    let status = if self.voxel.voxel_pending[i] {
+                    let status = if self.voxel.manager.voxel_pending[i] {
                         if t > 0 { format!("{pct:.1}%") } else { "…".into() }
                     } else {
                         "✓".into()
@@ -120,7 +121,7 @@ impl App {
 
                 ui.label(format!("FPS: {}", self.fps));
 
-                let voxel_resolution = self.voxel.voxel_resolution as u64;
+                let voxel_resolution = self.voxel.manager.voxel_resolution as u64;
                 ui.label(format!(
                     "Voxels: {}³ = {}",
                     format_with_commas(voxel_resolution),
