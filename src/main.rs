@@ -7,6 +7,7 @@ mod frame_timer;
 mod gpu;
 mod hot_reload;
 mod model;
+mod pipelines;
 mod push_constants;
 mod render_mode;
 mod rendering;

@@ -32,8 +32,8 @@ use winit_input_helper::WinitInputHelper;
 use crate::camera::Camera;
 use crate::frame_timer::FrameTimer;
 use crate::gpu::GpuContext;
-use crate::hot_reload::HotReloadComputePipeline;
 use crate::model::Model;
+use crate::pipelines::PipelineManager;
 use crate::push_constants::{PushConstantsInput, build_push_constants};
 use crate::render_mode::RenderMode;
 use crate::rendering::{RenderContext, get_images_and_sets, get_swapchain_images, load_icon};
@@ -45,9 +45,7 @@ const INITIAL_WINDOW_RESOLUTION: PhysicalSize<u32> = PhysicalSize::new(960, 960)
 pub struct App {
     pub(crate) gpu: GpuContext,
 
-    pub(crate) render_pipeline: HotReloadComputePipeline,
-    pub(crate) resample_pipeline: HotReloadComputePipeline,
-    render_pipeline_branchless: HotReloadComputePipeline,
+    pub(crate) pipelines: PipelineManager,
     // Voxel subsystem
     pub(crate) voxel: VoxelManager,
     pub(crate) future_grid_resolutions: Vec<u32>,
@@ -70,15 +68,7 @@ impl App {
         let gpu = GpuContext::new(event_loop);
 
         let shaders_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
-        let render_pipeline =
-            HotReloadComputePipeline::new(gpu.device.clone(), &shaders_dir.join("traverse.comp"));
-        let render_pipeline_branchless = HotReloadComputePipeline::with_defines(
-            gpu.device.clone(),
-            &shaders_dir.join("traverse.comp"),
-            vec![("BRANCHLESS_TRAVERSAL".to_string(), None::<String>)],
-        );
-        let resample_pipeline =
-            HotReloadComputePipeline::new(gpu.device.clone(), &shaders_dir.join("resample.comp"));
+        let pipelines = PipelineManager::new(gpu.device.clone(), &shaders_dir);
 
         let voxel = VoxelManager::new(
             INITIAL_VOXEL_RESOLUTION,
@@ -86,7 +76,7 @@ impl App {
             gpu.descriptor_set_allocator.clone(),
             gpu.command_buffer_allocator.clone(),
             gpu.queue.clone(),
-            &render_pipeline,
+            &pipelines.render,
         );
         let future_grid_resolutions = voxel.grid_resolutions.clone();
         let model = Model::Bunny;
@@ -107,9 +97,7 @@ impl App {
 
         App {
             gpu,
-            render_pipeline,
-            render_pipeline_branchless,
-            resample_pipeline,
+            pipelines,
             voxel,
             future_grid_resolutions,
             model,
@@ -157,7 +145,7 @@ impl App {
         // Drain any completed voxelization results and upload to GPU
         self.voxel.poll(
             self.gpu.descriptor_set_allocator.clone(),
-            &self.render_pipeline,
+            &self.pipelines.render,
             self.gpu.memory_allocator.clone(),
             self.gpu.command_buffer_allocator.clone(),
             self.gpu.queue.clone(),
@@ -175,9 +163,7 @@ impl App {
     }
 
     fn render(&mut self, _event_loop: &ActiveEventLoop) {
-        self.render_pipeline.maybe_reload();
-        self.resample_pipeline.maybe_reload();
-        self.render_pipeline_branchless.maybe_reload();
+        self.pipelines.maybe_reload();
 
         {
             let rcx = self.rcx.as_mut().unwrap();
@@ -212,8 +198,8 @@ impl App {
                     get_images_and_sets(
                         self.gpu.memory_allocator.clone(),
                         self.gpu.descriptor_set_allocator.clone(),
-                        &self.render_pipeline,
-                        &self.resample_pipeline,
+                        &self.pipelines.render,
+                        &self.pipelines.resample,
                         render_extent,
                         window_extent,
                     );
@@ -247,7 +233,7 @@ impl App {
                 self.gpu.memory_allocator.clone(),
                 self.gpu.command_buffer_allocator.clone(),
                 self.gpu.queue.clone(),
-                &self.render_pipeline,
+                &self.pipelines.render,
                 8,
             );
         }
@@ -260,8 +246,8 @@ impl App {
                 camera: &self.camera,
                 voxel: &self.voxel,
                 render_mode: self.render_mode as u32,
-                branching_pipeline: self.render_pipeline.clone(),
-                branchless_pipeline: self.render_pipeline_branchless.clone(),
+                branching_pipeline: self.pipelines.render.clone(),
+                branchless_pipeline: self.pipelines.render_branchless.clone(),
                 queue: self.gpu.queue.clone(),
                 command_buffer_allocator: self.gpu.command_buffer_allocator.clone(),
                 rcx: rcx_ref,
@@ -301,13 +287,13 @@ impl App {
         builder.clear_color_image(ClearColorImageInfo::image(rcx.render_image.clone())).unwrap();
 
         builder
-            .bind_pipeline_compute(self.render_pipeline.clone())
+            .bind_pipeline_compute(self.pipelines.render.clone())
             .unwrap()
-            .push_constants(self.render_pipeline.layout().clone(), 0, push_constants)
+            .push_constants(self.pipelines.render.layout().clone(), 0, push_constants)
             .unwrap()
             .bind_descriptor_sets(
                 PipelineBindPoint::Compute,
-                self.render_pipeline.layout().clone(),
+                self.pipelines.render.layout().clone(),
                 0,
                 vec![rcx.render_set.clone(), self.voxel.voxel_set.clone()],
             )
@@ -319,11 +305,11 @@ impl App {
         }
 
         builder
-            .bind_pipeline_compute(self.resample_pipeline.clone())
+            .bind_pipeline_compute(self.pipelines.resample.clone())
             .unwrap()
             .bind_descriptor_sets(
                 PipelineBindPoint::Compute,
-                self.resample_pipeline.layout().clone(),
+                self.pipelines.resample.layout().clone(),
                 0,
                 vec![rcx.resample_set.clone()],
             )
@@ -390,8 +376,8 @@ impl ApplicationHandler for App {
         let (render_image, render_set, resample_image, resample_set) = get_images_and_sets(
             self.gpu.memory_allocator.clone(),
             self.gpu.descriptor_set_allocator.clone(),
-            &self.render_pipeline,
-            &self.resample_pipeline,
+            &self.pipelines.render,
+            &self.pipelines.resample,
             render_extent,
             window_extent,
         );

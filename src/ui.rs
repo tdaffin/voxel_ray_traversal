@@ -58,8 +58,8 @@ impl App {
                     ) = get_images_and_sets(
                         self.gpu.memory_allocator.clone(),
                         self.gpu.descriptor_set_allocator.clone(),
-                        &self.render_pipeline,
-                        &self.resample_pipeline,
+                        &self.pipelines.render,
+                        &self.pipelines.resample,
                         render_extent,
                         window_extent,
                     );
