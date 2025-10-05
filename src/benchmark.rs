@@ -82,6 +82,7 @@ pub fn run(ctx: &mut BenchmarkContext) -> BenchmarkOutcome {
                 cam_pixel_to_ray: ctx.camera.pixel_to_ray_matrix(),
                 voxel: ctx.voxel,
                 render_mode: ctx.render_mode,
+                light_dir: [0.5, 0.8, 0.3],
             });
             let mut builder = AutoCommandBufferBuilder::primary(
                 ctx.command_buffer_allocator.clone(),

@@ -30,6 +30,7 @@ pub fn record_frame(
         cam_pixel_to_ray: camera.pixel_to_ray_matrix(),
         voxel,
         render_mode,
+        light_dir: [0.5, 0.8, 0.3],
     });
 
     let mut builder = AutoCommandBufferBuilder::primary(
