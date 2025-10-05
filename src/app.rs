@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::{
     f64::consts::{FRAC_PI_2, TAU},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use vulkano::{
     Validated, Version, VulkanError, VulkanLibrary,
@@ -38,6 +38,7 @@ use winit::{
 use winit_input_helper::WinitInputHelper;
 
 use crate::camera::Camera;
+use crate::frame_timer::FrameTimer;
 use crate::hot_reload::HotReloadComputePipeline;
 use crate::model::Model;
 use crate::push_constants::{PushConstantsInput, build_push_constants};
@@ -73,9 +74,8 @@ pub struct App {
 
     input: WinitInputHelper,
     focused: bool,
-    last_second: Instant,
-    frames_since_last_second: u32,
-    pub(crate) fps: u32,
+    frame_timer: FrameTimer,
+    pub(crate) fps: u32, // kept for external access; mirrors frame_timer.fps()
 
     pub(crate) rcx: Option<RenderContext>,
 }
@@ -214,8 +214,7 @@ impl App {
             render_scale: 1.0,
             input,
             focused: false,
-            last_second: Instant::now(),
-            frames_since_last_second: 0,
+            frame_timer: FrameTimer::new(),
             fps: 0,
             rcx: None,
         }
@@ -224,12 +223,8 @@ impl App {
     // start_background_voxelization now handled by VoxelManager
 
     fn update(&mut self, event_loop: &ActiveEventLoop) {
-        self.frames_since_last_second += 1;
-        let now = Instant::now();
-        if now.duration_since(self.last_second) >= Duration::from_secs(1) {
-            self.fps = self.frames_since_last_second;
-            self.frames_since_last_second = 0;
-            self.last_second = now;
+        if let Some(fps) = self.frame_timer.frame() {
+            self.fps = fps;
         }
         let Some(delta_time) = self.input.delta_time().as_ref().map(Duration::as_secs_f64) else {
             return;
