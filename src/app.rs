@@ -1,15 +1,13 @@
+use egui_winit_vulkano::{
+    Gui, GuiConfig,
+    egui::{self, Color32},
+};
+use nalgebra::{Matrix4, Vector3, Vector4};
 use std::path::PathBuf;
 use std::{
     f64::consts::{FRAC_PI_2, TAU},
     sync::Arc,
     time::{Duration, Instant},
-};
-// Added nalgebra imports for math types used throughout this file.
-use nalgebra::{Matrix4, Vector3, Vector4};
-// Egui integration (Gui / GuiConfig) and types
-use egui_winit_vulkano::{
-    Gui, GuiConfig,
-    egui::{self, Color32},
 };
 use vulkano::{
     Validated, Version, VulkanError, VulkanLibrary,
@@ -18,7 +16,7 @@ use vulkano::{
         AutoCommandBufferBuilder, BlitImageInfo, ClearColorImageInfo, CommandBufferUsage,
         allocator::StandardCommandBufferAllocator,
     },
-    descriptor_set::{DescriptorSet, allocator::StandardDescriptorSetAllocator},
+    descriptor_set::allocator::StandardDescriptorSetAllocator,
     device::{
         Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures, Queue, QueueCreateInfo,
         QueueFlags, physical::PhysicalDeviceType,
@@ -50,12 +48,7 @@ use crate::render_mode::RenderMode;
 use crate::rendering::{
     RenderContext, get_allocators, get_images_and_sets, get_swapchain_images, load_icon,
 };
-use crate::voxel::{build_voxel_descriptor_set, create_empty_voxel_placeholder};
-use crate::voxel_job::VoxelJobMessage;
-use crate::voxelize;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
+use crate::voxel_job::VoxelManager;
 
 const INITIAL_VOXEL_RESOLUTION: u32 = 24;
 const INITIAL_WINDOW_RESOLUTION: PhysicalSize<u32> = PhysicalSize::new(960, 960);
@@ -72,22 +65,10 @@ pub struct App {
     render_pipeline: HotReloadComputePipeline,
     resample_pipeline: HotReloadComputePipeline,
     render_pipeline_branchless: HotReloadComputePipeline,
-    // Restored voxel-related fields
-    voxel_set: Arc<DescriptorSet>,
-    voxel_resolution: u32,
-    grid_resolutions: Vec<u32>,
+    // Voxel subsystem
+    voxel: VoxelManager,
     future_grid_resolutions: Vec<u32>,
     model: Model,
-    active_voxel_grids: u32,
-    voxel_result_rx: Receiver<VoxelJobMessage>,
-
-    voxel_views: Vec<Option<Arc<ImageView>>>,
-    placeholder_view: Arc<ImageView>,
-    voxel_pending: Vec<bool>,
-    voxel_generation: u64,
-    cancel_requested: bool,
-    voxel_cancel_flag: Arc<AtomicBool>,
-    voxel_progress: Vec<(usize, usize)>, // (done,total)
 
     camera: Camera,
     render_mode: RenderMode,
@@ -193,45 +174,16 @@ impl App {
         let resample_pipeline =
             HotReloadComputePipeline::new(device.clone(), &shaders_dir.join("resample.comp"));
 
-        let voxel_resolution = INITIAL_VOXEL_RESOLUTION;
-        let grid_resolutions = vec![voxel_resolution; Model::ALL.len()];
-        let future_grid_resolutions = grid_resolutions.clone();
-        let model = Model::Bunny;
-        // Start with a single placeholder so we can build a descriptor set immediately.
-        let placeholder_view = create_empty_voxel_placeholder(
+        let voxel = VoxelManager::new(
+            INITIAL_VOXEL_RESOLUTION,
             memory_allocator.clone(),
+            descriptor_set_allocator.clone(),
             command_buffer_allocator.clone(),
             queue.clone(),
-            voxel_resolution,
-        );
-        let voxel_set = build_voxel_descriptor_set(
-            descriptor_set_allocator.clone(),
             &render_pipeline,
-            std::slice::from_ref(&placeholder_view),
         );
-        // Channel for background voxelization results (model_index, voxel data)
-        let (tx, rx) = mpsc::channel();
-        let voxel_generation = 1u64;
-        for (idx, model) in Model::ALL.iter().enumerate() {
-            let tx = tx.clone();
-            let path = model.path().as_ref().to_path_buf();
-            let res = grid_resolutions[idx];
-            let generation_id = voxel_generation;
-            thread::spawn(move || {
-                let vox = voxelize::ply_to_voxels(path, res); // initial sync path (no progress)
-                let _ = tx.send(VoxelJobMessage::Finished {
-                    generation: generation_id,
-                    index: idx,
-                    data: vox,
-                });
-            });
-        }
-        drop(tx); // close extra sender
-        let voxel_views: Vec<Option<Arc<ImageView>>> = vec![None; Model::ALL.len()];
-        let voxel_pending = vec![true; Model::ALL.len()];
-        let voxel_progress = vec![(0, 0); Model::ALL.len()];
-        let voxel_cancel_flag = Arc::new(AtomicBool::new(false));
-        let active_voxel_grids = Model::ALL.len() as u32;
+        let future_grid_resolutions = voxel.grid_resolutions.clone();
+        let model = Model::Bunny;
 
         let input = WinitInputHelper::new();
 
@@ -257,20 +209,9 @@ impl App {
             render_pipeline,
             render_pipeline_branchless,
             resample_pipeline,
-            voxel_set,
-            voxel_resolution,
-            grid_resolutions,
+            voxel,
             future_grid_resolutions,
             model,
-            active_voxel_grids,
-            voxel_result_rx: rx,
-            voxel_views,
-            placeholder_view,
-            voxel_pending,
-            voxel_generation,
-            cancel_requested: false,
-            voxel_cancel_flag,
-            voxel_progress,
             camera,
             render_mode: RenderMode::Coord,
             render_scale: 1.0,
@@ -283,70 +224,7 @@ impl App {
         }
     }
 
-    fn start_background_voxelization(&mut self) {
-        // Clear previous state
-        for v in &mut self.voxel_views {
-            *v = None;
-        }
-        self.active_voxel_grids = 0;
-        self.voxel_generation = self.voxel_generation.wrapping_add(1);
-        self.voxel_pending.fill(true);
-        self.cancel_requested = false;
-        self.voxel_cancel_flag.store(false, Ordering::Relaxed);
-        for p in &mut self.voxel_progress {
-            *p = (0, 0);
-        }
-        // Build a descriptor set with just the placeholder (already exists as first fallback)
-        self.voxel_set = build_voxel_descriptor_set(
-            self.descriptor_set_allocator.clone(),
-            &self.render_pipeline,
-            std::slice::from_ref(&self.placeholder_view),
-        );
-        let (tx, rx) = mpsc::channel();
-        self.voxel_result_rx = rx;
-        let generation_id = self.voxel_generation;
-        let cancel_flag = self.voxel_cancel_flag.clone();
-        for (idx, model) in Model::ALL.iter().enumerate() {
-            let txc = tx.clone();
-            let path = model.path().as_ref().to_path_buf();
-            let gen_thread = generation_id;
-            let cancel_local = cancel_flag.clone();
-            let res_for_grid = self.grid_resolutions[idx];
-            thread::spawn(move || {
-                use voxelize::{VoxelProgressCallbacks, ply_to_voxels_with_progress};
-                let cancelled = cancel_local.clone();
-                let prog_cb = VoxelProgressCallbacks {
-                    cancelled: &cancelled,
-                    progress: Some(Box::new({
-                        let txp = txc.clone();
-                        move |done, total| {
-                            let _ = txp.send(VoxelJobMessage::Progress {
-                                generation: gen_thread,
-                                index: idx,
-                                done,
-                                total,
-                            });
-                        }
-                    })),
-                };
-                if let Some(vox) = ply_to_voxels_with_progress(path, res_for_grid, prog_cb) {
-                    if !cancelled.load(Ordering::Relaxed) {
-                        let _ = txc.send(VoxelJobMessage::Finished {
-                            generation: gen_thread,
-                            index: idx,
-                            data: vox,
-                        });
-                    } else {
-                        let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
-                    }
-                } else {
-                    let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
-                }
-            });
-        }
-        // drop original sender so channel closes when all jobs done
-        drop(tx);
-    }
+    // start_background_voxelization now handled by VoxelManager
 
     fn update(&mut self, event_loop: &ActiveEventLoop) {
         self.frames_since_last_second += 1;
@@ -381,63 +259,13 @@ impl App {
         }
         let rcx = self.rcx.as_mut().unwrap();
         // Drain any completed voxelization results and upload to GPU
-        while let Ok(msg) = self.voxel_result_rx.try_recv() {
-            match msg {
-                VoxelJobMessage::Progress { generation, index, done, total } => {
-                    if generation != self.voxel_generation {
-                        continue;
-                    }
-                    if index < self.voxel_progress.len() {
-                        self.voxel_progress[index] = (done, total);
-                    }
-                }
-                VoxelJobMessage::Finished { generation, index, data } => {
-                    if generation != self.voxel_generation {
-                        continue;
-                    }
-                    if self.cancel_requested {
-                        continue;
-                    }
-                    if index < self.voxel_views.len() {
-                        let view = crate::voxel::create_voxel_image_view(
-                            self.memory_allocator.clone(),
-                            self.command_buffer_allocator.clone(),
-                            self.queue.clone(),
-                            data,
-                            self.voxel_resolution,
-                        );
-                        self.voxel_views[index] = Some(view);
-                        self.voxel_pending[index] = false;
-                    }
-                }
-                VoxelJobMessage::Cancelled { generation } => {
-                    if generation != self.voxel_generation {
-                        continue;
-                    }
-                    // Mark all pending as false if global cancel to stop spinner display
-                    if self.cancel_requested {
-                        self.voxel_pending.fill(false);
-                    }
-                }
-            }
-            // Rebuild descriptor set with contiguous ready views from start after any change
-            let mut ready: Vec<Arc<ImageView>> = Vec::new();
-            for opt in &self.voxel_views {
-                match opt {
-                    Some(v) => ready.push(v.clone()),
-                    None => break,
-                }
-            }
-            self.active_voxel_grids = ready.len() as u32;
-            if self.active_voxel_grids > 0 {
-                let voxel_set = build_voxel_descriptor_set(
-                    self.descriptor_set_allocator.clone(),
-                    &self.render_pipeline,
-                    &ready,
-                );
-                self.voxel_set = voxel_set;
-            }
-        }
+        self.voxel.poll(
+            self.descriptor_set_allocator.clone(),
+            &self.render_pipeline,
+            self.memory_allocator.clone(),
+            self.command_buffer_allocator.clone(),
+            self.queue.clone(),
+        );
         if self.input.mouse_pressed(MouseButton::Left) {
             self.focused = true;
             rcx.window.set_cursor_grab(CursorGrabMode::Confined).unwrap();
@@ -529,8 +357,11 @@ impl App {
                 });
                 ui.separator();
                 ui.add(
-                    egui::Slider::new(&mut self.active_voxel_grids, 1..=Model::ALL.len() as u32)
-                        .text("Active Grids"),
+                    egui::Slider::new(
+                        &mut self.voxel.active_voxel_grids,
+                        1..=Model::ALL.len() as u32,
+                    )
+                    .text("Active Grids"),
                 );
                 if ui.button("Benchmark Traversal Variants").clicked() {
                     trigger_benchmark = true;
@@ -584,18 +415,17 @@ impl App {
                     request_regen_voxels = true;
                 }
                 if ui.button("Cancel Voxelization").clicked() {
-                    self.cancel_requested = true;
-                    self.voxel_cancel_flag.store(true, Ordering::Relaxed);
+                    self.voxel.cancel();
                 }
                 ui.separator();
                 // Progress overview
-                let total = self.voxel_pending.len();
-                let remaining = self.voxel_pending.iter().filter(|b| **b).count();
+                let total = self.voxel.voxel_pending.len();
+                let remaining = self.voxel.voxel_pending.iter().filter(|b| **b).count();
                 ui.label(format!("Voxelization: {} / {} finished", total - remaining, total));
-                for (i, (done, total_tris)) in self.voxel_progress.iter().enumerate() {
+                for (i, (done, total_tris)) in self.voxel.voxel_progress.iter().enumerate() {
                     let (d, t) = (*done, *total_tris);
                     let pct = if t > 0 { (d as f32 / t as f32 * 100.0).min(100.0) } else { 0.0 };
-                    let status = if self.voxel_pending[i] {
+                    let status = if self.voxel.voxel_pending[i] {
                         if t > 0 { format!("{pct:.1}%") } else { "…".into() }
                     } else {
                         "✓".into()
@@ -618,7 +448,7 @@ impl App {
 
                 ui.label(format!("FPS: {}", self.fps));
 
-                let voxel_resolution = self.voxel_resolution as u64;
+                let voxel_resolution = self.voxel.voxel_resolution as u64;
                 ui.label(format!(
                     "Voxels: {}³ = {}",
                     format_with_commas(voxel_resolution),
@@ -645,24 +475,15 @@ impl App {
         });
         if request_regen_voxels {
             // Copy future per-grid resolutions into active ones (truncate/extend safely)
-            for (i, r) in self.future_grid_resolutions.clone().into_iter().enumerate() {
-                if i < self.grid_resolutions.len() {
-                    self.grid_resolutions[i] = r.div_ceil(8) * 8;
-                }
-            }
-            // Keep legacy voxel_resolution for placeholder scaling / camera framing using max grid size for now
-            if let Some(maxr) = self.grid_resolutions.iter().copied().max() {
-                self.voxel_resolution = maxr;
-            }
-            // Placeholder minimized to 8 regardless of targets
-            let placeholder_res = 8u32;
-            self.placeholder_view = create_empty_voxel_placeholder(
+            self.voxel.future_grid_resolutions = self.future_grid_resolutions.clone();
+            self.voxel.regenerate(
+                self.descriptor_set_allocator.clone(),
                 self.memory_allocator.clone(),
                 self.command_buffer_allocator.clone(),
                 self.queue.clone(),
-                placeholder_res,
+                &self.render_pipeline,
+                8,
             );
-            self.start_background_voxelization();
         }
 
         if trigger_benchmark {
@@ -708,7 +529,7 @@ impl App {
                     }
                     let render_extent = rcx.render_image.extent();
                     let pixel_to_ray = self.camera.pixel_to_ray_matrix();
-                    let size = self.voxel_resolution as f64;
+                    let size = self.voxel.voxel_resolution as f64;
                     let mut scale_and_center = Matrix4::from_diagonal(&Vector4::from_element(size));
                     scale_and_center.set_column(3, &Vector3::from_element(0.5 * size).push(1.0));
                     let pixel_to_ray = scale_and_center * pixel_to_ray;
@@ -723,13 +544,13 @@ impl App {
                     }
                     // Clamp to 3 since shader only declares space for 3 grids now
                     let voxel_count =
-                        self.active_voxel_grids.min(Model::ALL.len() as u32).max(1).min(3);
+                        self.voxel.active_voxel_grids.min(Model::ALL.len() as u32).max(1).min(3);
                     let mut resolutions = [0u32; 3];
-                    for (i, r) in self.grid_resolutions.iter().take(3).enumerate() {
+                    for (i, r) in self.voxel.grid_resolutions.iter().take(3).enumerate() {
                         resolutions[i] = *r;
                     }
-                    if voxel_count as usize > self.grid_resolutions.len() {
-                        resolutions[0] = self.voxel_resolution;
+                    if voxel_count as usize > self.voxel.grid_resolutions.len() {
+                        resolutions[0] = self.voxel.voxel_resolution;
                     }
                     let push_constants = PushConstants {
                         pixel_to_ray: pixel_to_ray.cast(),
@@ -763,7 +584,7 @@ impl App {
                             PipelineBindPoint::Compute,
                             pipe.layout().clone(),
                             0,
-                            vec![rcx.render_set.clone(), self.voxel_set.clone()],
+                            vec![rcx.render_set.clone(), self.voxel.voxel_set.clone()],
                         )
                         .unwrap();
                     unsafe {
@@ -853,7 +674,7 @@ impl App {
 
         let pixel_to_ray = self.camera.pixel_to_ray_matrix();
 
-        let size = self.voxel_resolution as f64;
+        let size = self.voxel.voxel_resolution as f64;
         let mut scale_and_center = Matrix4::from_diagonal(&Vector4::from_element(size));
         scale_and_center.set_column(3, &Vector3::from_element(0.5 * size).push(1.0));
         let pixel_to_ray = scale_and_center * pixel_to_ray;
@@ -867,14 +688,14 @@ impl App {
             _pad: [u32; 2],
             resolutions: [u32; 3],
         }
-        let effective_count = self.active_voxel_grids.min(Model::ALL.len() as u32).max(1).min(3);
+        let effective_count =
+            self.voxel.active_voxel_grids.min(Model::ALL.len() as u32).max(1).min(3);
         let mut res_arr = [0u32; 3];
-        for (i, r) in self.grid_resolutions.iter().take(3).enumerate() {
+        for (i, r) in self.voxel.grid_resolutions.iter().take(3).enumerate() {
             res_arr[i] = *r;
         }
-        if effective_count as usize > self.grid_resolutions.len() {
-            // placeholder path
-            res_arr[0] = self.voxel_resolution;
+        if effective_count as usize > self.voxel.grid_resolutions.len() {
+            res_arr[0] = self.voxel.voxel_resolution;
         }
         let push_constants = PushConstants {
             pixel_to_ray: pixel_to_ray.cast(),
@@ -902,7 +723,7 @@ impl App {
                 PipelineBindPoint::Compute,
                 self.render_pipeline.layout().clone(),
                 0,
-                vec![rcx.render_set.clone(), self.voxel_set.clone()],
+                vec![rcx.render_set.clone(), self.voxel.voxel_set.clone()],
             )
             .unwrap();
         unsafe {
