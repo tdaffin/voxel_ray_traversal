@@ -26,6 +26,9 @@ layout(set = 0, binding = 0, rgba8) writeonly uniform image2D targetImage;
 // Fixed-size descriptor array to simplify host binding (avoid runtime descriptor array issues)
 const int MAX_GRIDS = 32;
 layout(set = 1, binding = 0, rgba32ui) readonly uniform uimage3D voxelImages[MAX_GRIDS];
+// Per-voxel palette index (R8_UINT) stored in R component of each texel.
+// Future enhancement: add a small palette buffer (e.g. SSBO of vec4) so index -> color lookup supports custom materials.
+layout(set = 1, binding = 1, r8ui) readonly uniform uimage3D voxelColorIndices[MAX_GRIDS];
 
 // https://www.shadertoy.com/view/WlfXRN
 vec3 inferno(float t) {
@@ -184,7 +187,9 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uint voxel_resolution, out 
             // - AO considers orthogonal neighbor occupancy around the stepped neighbor cell.
             // - Uses the traversed normal derived above (same as NORMAL case logic) and mixes with a simple depth term.
             {
-                vec3 voxel_base_color = vec3(1.0); // placeholder for future voxel material/color
+                // Fetch palette index (0-255) for this voxel; grayscale procedural palette for now.
+                uint palette_idx = imageLoad(voxelColorIndices[gridIndex], ivec3(coord)).r;
+                vec3 voxel_base_color = vec3(float(palette_idx) / 255.0);
                 // Reconstruct surface normal (same as NORMAL case):
                 vec3 normal = -mask * sgn_dir;
                 // Normalize (should already be unit length along axis, but keep for safety if logic changes):

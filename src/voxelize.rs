@@ -21,7 +21,7 @@ pub struct VoxelProgressCallbacks<'a> {
 
 pub fn ply_to_voxels_with_progress(
     path: impl AsRef<Path>, resolution: u32, cb: VoxelProgressCallbacks,
-) -> Option<Vec<u128>> {
+) -> Option<(Vec<u128>, Vec<u8>)> {
     let mut mesh = parse_ply(path);
     if cb.cancelled.load(Ordering::Relaxed) {
         return None;
@@ -30,14 +30,14 @@ pub fn ply_to_voxels_with_progress(
     if cb.cancelled.load(Ordering::Relaxed) {
         return None;
     }
-    let voxels = voxelize_mesh_progress(&mesh, resolution, &cb);
+    let (voxels, color_indices) = voxelize_mesh_progress(&mesh, resolution, &cb);
     if cb.cancelled.load(Ordering::Relaxed) {
         return None;
     }
-    Some(voxels)
+    Some((voxels, color_indices))
 }
 
-pub fn ply_to_voxels(path: impl AsRef<Path>, resolution: u32) -> Vec<u128> {
+pub fn ply_to_voxels(path: impl AsRef<Path>, resolution: u32) -> (Vec<u128>, Vec<u8>) {
     ply_to_voxels_with_progress(
         path,
         resolution,
@@ -142,9 +142,13 @@ fn transform_vertices(vertices: &mut [Vec3], resolution: u32) {
 // Each u128 is an rgba32ui on the GPU in a 3D texture.
 // Each texel is 4x4x8 voxels, and each channel is 1x4x8 voxels.
 
-fn voxelize_mesh_progress(mesh: &Mesh, resolution: u32, cb: &VoxelProgressCallbacks) -> Vec<u128> {
+fn voxelize_mesh_progress(
+    mesh: &Mesh, resolution: u32, cb: &VoxelProgressCallbacks,
+) -> (Vec<u128>, Vec<u8>) {
     let resolution = resolution as usize;
     let mut voxels = vec![0u128; resolution * resolution * resolution / 128];
+    // One color index byte per voxel (Option C); simple procedural assignment now.
+    let mut color_indices = vec![0u8; resolution * resolution * resolution];
     let total = mesh.triangles.len();
     let mut processed = 0usize;
     for triangle in &mesh.triangles {
@@ -159,6 +163,9 @@ fn voxelize_mesh_progress(mesh: &Mesh, resolution: u32, cb: &VoxelProgressCallba
             let texel = (x + ((y + (z / 8) * resolution) / 4) * resolution) / 4;
             let bit = (x % 4) * 32 + (y % 4) + (z % 8) * 4;
             voxels[texel] |= 1 << bit;
+            // Procedural palette index: gradient based on z (0..255 wrap)
+            let idx = (z & 0xFF) as u8;
+            color_indices[(z * resolution + y) * resolution + x] = idx;
         });
         processed += 1;
         if processed % 256 == 0 {
@@ -171,7 +178,7 @@ fn voxelize_mesh_progress(mesh: &Mesh, resolution: u32, cb: &VoxelProgressCallba
     if let Some(p) = &cb.progress {
         p(processed, total);
     }
-    voxels
+    (voxels, color_indices)
 }
 
 struct Helper {

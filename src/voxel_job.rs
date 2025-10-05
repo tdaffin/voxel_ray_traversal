@@ -22,7 +22,7 @@ use crate::{
 
 #[derive(Debug)]
 pub enum VoxelJobMessage {
-    Finished { generation: u64, index: usize, data: Vec<u128> },
+    Finished { generation: u64, index: usize, data: Vec<u128>, colors: Vec<u8> },
     Progress { generation: u64, index: usize, done: usize, total: usize },
     Cancelled { generation: u64 },
 }
@@ -36,10 +36,12 @@ pub struct VoxelManager {
     pub active_voxel_grids: u32,
 
     pub voxel_views: Vec<Option<Arc<ImageView>>>,
+    pub color_index_views: Vec<Option<Arc<ImageView>>>,
     pub voxel_pending: Vec<bool>,
     pub voxel_progress: Vec<(usize, usize)>,
 
     placeholder_view: Arc<ImageView>,
+    placeholder_color_view: Arc<ImageView>,
     voxel_result_rx: Receiver<VoxelJobMessage>,
     voxel_generation: u64,
     cancel_requested: bool,
@@ -61,10 +63,17 @@ impl VoxelManager {
             queue.clone(),
             initial_resolution,
         );
+        let placeholder_color_view = crate::voxel::create_empty_color_index_placeholder(
+            memory_allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            initial_resolution,
+        );
         let voxel_set = build_voxel_descriptor_set(
             descriptor_set_allocator.clone(),
             render_pipeline,
             std::slice::from_ref(&placeholder_view),
+            std::slice::from_ref(&placeholder_color_view),
         );
         let (tx, rx) = mpsc::channel();
         let voxel_generation = 1u64;
@@ -74,16 +83,13 @@ impl VoxelManager {
             let res = grid_resolutions[idx];
             let generation_id = voxel_generation;
             thread::spawn(move || {
-                let vox = voxelize::ply_to_voxels(path, res);
-                let _ = txc.send(VoxelJobMessage::Finished {
-                    generation: generation_id,
-                    index: idx,
-                    data: vox,
-                });
+                let (vox, colors) = voxelize::ply_to_voxels(path, res);
+                let _ = txc.send(VoxelJobMessage::Finished { generation: generation_id, index: idx, data: vox, colors });
             });
         }
         drop(tx);
-        let voxel_views = vec![None; Model::ALL.len()];
+    let voxel_views = vec![None; Model::ALL.len()];
+    let color_index_views = vec![None; Model::ALL.len()];
         let voxel_pending = vec![true; Model::ALL.len()];
         let voxel_progress = vec![(0, 0); Model::ALL.len()];
         let voxel_cancel_flag = Arc::new(AtomicBool::new(false));
@@ -95,9 +101,11 @@ impl VoxelManager {
             future_grid_resolutions,
             active_voxel_grids,
             voxel_views,
+            color_index_views,
             voxel_pending,
             voxel_progress,
             placeholder_view,
+            placeholder_color_view,
             voxel_result_rx: rx,
             voxel_generation,
             cancel_requested: false,
@@ -120,7 +128,7 @@ impl VoxelManager {
                         self.voxel_progress[index] = (done, total);
                     }
                 }
-                VoxelJobMessage::Finished { generation, index, data } => {
+                VoxelJobMessage::Finished { generation, index, data, colors } => {
                     if generation != self.voxel_generation || self.cancel_requested {
                         continue;
                     }
@@ -133,6 +141,15 @@ impl VoxelManager {
                             self.voxel_resolution,
                         );
                         self.voxel_views[index] = Some(view);
+                        // Create color index image view
+                        let cview = crate::voxel::create_color_index_image_view(
+                            memory_allocator.clone(),
+                            command_buffer_allocator.clone(),
+                            queue.clone(),
+                            colors,
+                            self.voxel_resolution,
+                        );
+                        self.color_index_views[index] = Some(cview);
                         self.voxel_pending[index] = false;
                     }
                 }
@@ -147,9 +164,16 @@ impl VoxelManager {
             }
             // rebuild contiguous descriptor set
             let mut ready: Vec<Arc<ImageView>> = Vec::new();
-            for opt in &self.voxel_views {
-                if let Some(v) = opt {
-                    ready.push(v.clone());
+            let mut ready_colors: Vec<Arc<ImageView>> = Vec::new();
+            for i in 0..self.voxel_views.len() {
+                if let Some(ref v) = self.voxel_views[i] {
+                    // Only include color view if both present
+                    if let Some(ref cv) = self.color_index_views[i] {
+                        ready.push(v.clone());
+                        ready_colors.push(cv.clone());
+                    } else {
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -160,6 +184,7 @@ impl VoxelManager {
                     descriptor_set_allocator.clone(),
                     render_pipeline,
                     &ready,
+                    &ready_colors,
                 );
             }
         }
@@ -201,6 +226,7 @@ impl VoxelManager {
         for v in &mut self.voxel_views {
             *v = None;
         }
+        for c in &mut self.color_index_views { *c = None; }
         self.active_voxel_grids = 0;
         self.voxel_generation = self.voxel_generation.wrapping_add(1);
         self.voxel_pending.fill(true);
@@ -213,6 +239,7 @@ impl VoxelManager {
             descriptor_set_allocator.clone(),
             render_pipeline,
             std::slice::from_ref(&self.placeholder_view),
+            std::slice::from_ref(&self.placeholder_color_view),
         );
         let (tx, rx) = mpsc::channel();
         self.voxel_result_rx = rx;
@@ -241,13 +268,9 @@ impl VoxelManager {
                         }
                     })),
                 };
-                if let Some(vox) = ply_to_voxels_with_progress(path, res_for_grid, prog_cb) {
+                if let Some((vox, colors)) = ply_to_voxels_with_progress(path, res_for_grid, prog_cb) {
                     if !cancelled.load(Ordering::Relaxed) {
-                        let _ = txc.send(VoxelJobMessage::Finished {
-                            generation: gen_thread,
-                            index: idx,
-                            data: vox,
-                        });
+                        let _ = txc.send(VoxelJobMessage::Finished { generation: gen_thread, index: idx, data: vox, colors });
                     } else {
                         let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
                     }
