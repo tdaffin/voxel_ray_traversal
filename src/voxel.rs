@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage, CopyBufferToImageInfo,
     PrimaryCommandBufferAbstract,
@@ -18,7 +18,8 @@ use vulkano::pipeline::compute::ComputePipeline;
 /// The shader must declare matching bindings [0..N-1].
 pub fn build_voxel_descriptor_set(
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-    render_pipeline: &ComputePipeline, image_views: &[Arc<ImageView>], color_index_views: &[Arc<ImageView>],
+    render_pipeline: &ComputePipeline, image_views: &[Arc<ImageView>],
+    color_index_views: &[Arc<ImageView>], palette_buffer: Subbuffer<[[f32; 4]]>,
 ) -> Arc<DescriptorSet> {
     assert!(!image_views.is_empty(), "Need at least one voxel image view");
     const MAX_GRIDS: usize = 32; // keep in sync with shader
@@ -36,6 +37,7 @@ pub fn build_voxel_descriptor_set(
     let writes = [
         WriteDescriptorSet::image_view_array(0, 0, padded.iter().cloned()),
         WriteDescriptorSet::image_view_array(1, 0, padded_colors.iter().cloned()),
+        WriteDescriptorSet::buffer(2, palette_buffer.clone()),
     ];
     DescriptorSet::new(descriptor_set_allocator, layout, writes, [])
         .expect("Failed to create voxel descriptor set (array)")
@@ -141,6 +143,25 @@ pub fn create_color_index_image_view(
 
     ImageView::new(image.clone(), vulkano::image::view::ImageViewCreateInfo::from_image(&image))
         .expect("Failed to create color index image view")
+}
+
+/// Create a palette buffer (Vec<vec4>) with up to 256 colors. Returns subbuffer.
+pub fn create_palette_buffer(
+    memory_allocator: Arc<StandardMemoryAllocator>, colors: &[[f32; 4]],
+) -> Subbuffer<[[f32; 4]]> {
+    let usage = BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST;
+    let buffer = Buffer::from_iter(
+        memory_allocator,
+        BufferCreateInfo { usage, ..Default::default() },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        colors.iter().cloned(),
+    )
+    .expect("Failed to create palette buffer");
+    buffer
 }
 
 /// Create an empty placeholder voxel image view (all zeros) so the app can start immediately

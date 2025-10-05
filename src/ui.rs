@@ -40,6 +40,29 @@ impl App {
                     trigger_benchmark = true;
                 }
                 ui.add(egui::Slider::new(&mut self.camera.fov, 0.0..=180.0).text("FOV"));
+                ui.separator();
+                ui.label("Light Direction (spherical):");
+                static mut THETA: f32 = 0.9; // elevation
+                static mut PHI: f32 = 0.6; // azimuth
+                // Safe because single-threaded UI pass
+                let mut theta;
+                let mut phi;
+                unsafe {
+                    theta = THETA;
+                    phi = PHI;
+                }
+                if ui.add(egui::Slider::new(&mut theta, -1.57..=1.57).text("Elevation")).changed() {
+                    unsafe {
+                        THETA = theta;
+                    }
+                }
+                if ui.add(egui::Slider::new(&mut phi, -3.1415..=3.1415).text("Azimuth")).changed() {
+                    unsafe {
+                        PHI = phi;
+                    }
+                }
+                let ct = theta.cos();
+                self.light_dir = [ct * phi.cos(), theta.sin(), ct * phi.sin()];
                 // Render scale slider -> may recreate render & resample images
                 if ui
                     .add(

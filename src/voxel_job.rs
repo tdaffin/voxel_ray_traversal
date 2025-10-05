@@ -7,6 +7,7 @@ use std::{
     thread,
 };
 
+use vulkano::buffer::Subbuffer;
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::descriptor_set::{DescriptorSet, allocator::StandardDescriptorSetAllocator};
 use vulkano::device::Queue;
@@ -42,6 +43,7 @@ pub struct VoxelManager {
 
     placeholder_view: Arc<ImageView>,
     placeholder_color_view: Arc<ImageView>,
+    palette_buffer: Subbuffer<[[f32; 4]]>,
     voxel_result_rx: Receiver<VoxelJobMessage>,
     voxel_generation: u64,
     cancel_requested: bool,
@@ -69,11 +71,28 @@ impl VoxelManager {
             queue.clone(),
             initial_resolution,
         );
+        // Build default palette (simple distinct hues)
+        let mut palette: Vec<[f32; 4]> = Vec::new();
+        for i in 0..256u32 {
+            let h = (i as f32) / 256.0;
+            // HSV to RGB (s=0.85,v=1.0) quick approximation
+            let s = 0.85;
+            let v = 1.0;
+            let k = |n: f32| ((n + h * 6.0) % 6.0).clamp(0.0, 6.0);
+            let f = |n: f32| v - v * s * f32::max(0.0, f32::min(f32::min(k(n), 4.0 - k(n)), 1.0));
+            let r = f(5.0);
+            let g = f(3.0);
+            let b = f(1.0);
+            palette.push([r, g, b, 1.0]);
+        }
+        let palette_buffer =
+            crate::voxel::create_palette_buffer(memory_allocator.clone(), &palette);
         let voxel_set = build_voxel_descriptor_set(
             descriptor_set_allocator.clone(),
             render_pipeline,
             std::slice::from_ref(&placeholder_view),
             std::slice::from_ref(&placeholder_color_view),
+            palette_buffer.clone(),
         );
         let (tx, rx) = mpsc::channel();
         let voxel_generation = 1u64;
@@ -82,14 +101,21 @@ impl VoxelManager {
             let path = model.path().as_ref().to_path_buf();
             let res = grid_resolutions[idx];
             let generation_id = voxel_generation;
+            let base_palette_index = (idx as u32 * (256 / Model::ALL.len() as u32)) as u8;
+            // Each model gets a contiguous 16-color sub-range (low nibble variation added during voxel write).
             thread::spawn(move || {
-                let (vox, colors) = voxelize::ply_to_voxels(path, res);
-                let _ = txc.send(VoxelJobMessage::Finished { generation: generation_id, index: idx, data: vox, colors });
+                let (vox, colors) = voxelize::ply_to_voxels(path, res, base_palette_index);
+                let _ = txc.send(VoxelJobMessage::Finished {
+                    generation: generation_id,
+                    index: idx,
+                    data: vox,
+                    colors,
+                });
             });
         }
         drop(tx);
-    let voxel_views = vec![None; Model::ALL.len()];
-    let color_index_views = vec![None; Model::ALL.len()];
+        let voxel_views = vec![None; Model::ALL.len()];
+        let color_index_views = vec![None; Model::ALL.len()];
         let voxel_pending = vec![true; Model::ALL.len()];
         let voxel_progress = vec![(0, 0); Model::ALL.len()];
         let voxel_cancel_flag = Arc::new(AtomicBool::new(false));
@@ -106,6 +132,7 @@ impl VoxelManager {
             voxel_progress,
             placeholder_view,
             placeholder_color_view,
+            palette_buffer,
             voxel_result_rx: rx,
             voxel_generation,
             cancel_requested: false,
@@ -185,6 +212,7 @@ impl VoxelManager {
                     render_pipeline,
                     &ready,
                     &ready_colors,
+                    self.palette_buffer.clone(),
                 );
             }
         }
@@ -226,7 +254,9 @@ impl VoxelManager {
         for v in &mut self.voxel_views {
             *v = None;
         }
-        for c in &mut self.color_index_views { *c = None; }
+        for c in &mut self.color_index_views {
+            *c = None;
+        }
         self.active_voxel_grids = 0;
         self.voxel_generation = self.voxel_generation.wrapping_add(1);
         self.voxel_pending.fill(true);
@@ -240,6 +270,7 @@ impl VoxelManager {
             render_pipeline,
             std::slice::from_ref(&self.placeholder_view),
             std::slice::from_ref(&self.placeholder_color_view),
+            self.palette_buffer.clone(),
         );
         let (tx, rx) = mpsc::channel();
         self.voxel_result_rx = rx;
@@ -254,6 +285,8 @@ impl VoxelManager {
             thread::spawn(move || {
                 use crate::voxelize::{VoxelProgressCallbacks, ply_to_voxels_with_progress};
                 let cancelled = cancel_local.clone();
+                let base_palette_index = (idx as u32 * (256 / Model::ALL.len() as u32)) as u8;
+                // Matches logic in initial spawn; ensures deterministic palette mapping.
                 let prog_cb = VoxelProgressCallbacks {
                     cancelled: &cancelled,
                     progress: Some(Box::new({
@@ -268,9 +301,16 @@ impl VoxelManager {
                         }
                     })),
                 };
-                if let Some((vox, colors)) = ply_to_voxels_with_progress(path, res_for_grid, prog_cb) {
+                if let Some((vox, colors)) =
+                    ply_to_voxels_with_progress(path, res_for_grid, base_palette_index, prog_cb)
+                {
                     if !cancelled.load(Ordering::Relaxed) {
-                        let _ = txc.send(VoxelJobMessage::Finished { generation: gen_thread, index: idx, data: vox, colors });
+                        let _ = txc.send(VoxelJobMessage::Finished {
+                            generation: gen_thread,
+                            index: idx,
+                            data: vox,
+                            colors,
+                        });
                     } else {
                         let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
                     }

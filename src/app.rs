@@ -41,6 +41,7 @@ pub struct App {
     pub(crate) camera: Camera,
     pub(crate) render_mode: RenderMode,
     pub(crate) render_scale: f32,
+    pub(crate) light_dir: [f32; 3],
 
     input: InputController,
     frame_timer: FrameTimer,
@@ -63,6 +64,7 @@ impl App {
             camera,
             render_mode,
             render_scale,
+            light_dir: [0.5, 0.8, 0.3],
             input,
             frame_timer,
             rcx: None,
@@ -152,6 +154,7 @@ impl App {
             &mut self.camera,
             self.render_mode as u32,
             image_index,
+            self.light_dir,
         );
 
         let render_future =
