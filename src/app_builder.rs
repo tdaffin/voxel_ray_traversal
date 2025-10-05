@@ -30,7 +30,7 @@ impl Default for AppBuilder {
         Self {
             initial_voxel_resolution: DEFAULT_INITIAL_VOXEL_RESOLUTION,
             model: Model::Bunny,
-            render_mode: RenderMode::Coord,
+            render_mode: RenderMode::Shade,
             render_scale: 1.0,
             window_resolution: DEFAULT_WINDOW_RESOLUTION,
             camera_fov: 35.0,
