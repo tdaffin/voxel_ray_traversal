@@ -16,7 +16,7 @@ use vulkano::{
         view::{ImageView, ImageViewCreateInfo},
     },
     pipeline::{Pipeline, PipelineBindPoint},
-    swapchain::{Surface, SwapchainCreateInfo, SwapchainPresentInfo, acquire_next_image},
+    swapchain::{Surface, SwapchainPresentInfo, acquire_next_image},
     sync::GpuFuture,
 };
 use winit::dpi::PhysicalSize;
@@ -170,41 +170,15 @@ impl App {
             if self.input.window_resized().is_some() {
                 rcx.recreate_swapchain = true;
             }
-            let window_size = rcx.window.inner_size();
-
-            if window_size.width == 0 || window_size.height == 0 {
+            if rcx.window.inner_size().width == 0 || rcx.window.inner_size().height == 0 {
                 return;
             }
-
-            if rcx.recreate_swapchain {
-                let images;
-                (rcx.swapchain, images) = rcx
-                    .swapchain
-                    .recreate(SwapchainCreateInfo {
-                        image_extent: window_size.into(),
-                        ..rcx.swapchain.create_info()
-                    })
-                    .unwrap();
-                rcx.image_views = images
-                    .iter()
-                    .map(|i| ImageView::new(i.clone(), ImageViewCreateInfo::from_image(i)).unwrap())
-                    .collect();
-                let window_extent: [u32; 2] = window_size.into();
-                let render_extent = [
-                    (window_extent[0] as f32 * self.render_scale) as u32,
-                    (window_extent[1] as f32 * self.render_scale) as u32,
-                ];
-                (rcx.render_image, rcx.render_set, rcx.resample_image, rcx.resample_set) =
-                    get_images_and_sets(
-                        self.gpu.memory_allocator.clone(),
-                        self.gpu.descriptor_set_allocator.clone(),
-                        &self.pipelines.render,
-                        &self.pipelines.resample,
-                        render_extent,
-                        window_extent,
-                    );
-                rcx.recreate_swapchain = false;
-            }
+            crate::swapchain_resources::ensure_swapchain_resources(
+                rcx,
+                &self.gpu,
+                &self.pipelines,
+                self.render_scale,
+            );
         }
 
         let (image_index, suboptimal, acquire_future) = {
