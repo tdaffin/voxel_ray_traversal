@@ -1,11 +1,8 @@
+use crate::input_controller::InputController;
 use egui_winit_vulkano::{Gui, GuiConfig};
 use nalgebra::Vector3;
 use std::path::PathBuf;
-use std::{
-    f64::consts::{FRAC_PI_2, TAU},
-    sync::Arc,
-    time::Duration,
-};
+use std::sync::Arc;
 use vulkano::{
     Validated, VulkanError,
     command_buffer::{
@@ -22,10 +19,9 @@ use vulkano::{
 use winit::dpi::PhysicalSize;
 use winit::{
     application::ApplicationHandler,
-    event::{DeviceEvent, DeviceId, MouseButton, WindowEvent},
+    event::{DeviceEvent, DeviceId, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::KeyCode,
-    window::{CursorGrabMode, Window, WindowId},
+    window::{Window, WindowId},
 };
 use winit_input_helper::WinitInputHelper;
 
@@ -55,8 +51,7 @@ pub struct App {
     pub(crate) render_mode: RenderMode,
     pub(crate) render_scale: f32,
 
-    input: WinitInputHelper,
-    focused: bool,
+    input: InputController,
     frame_timer: FrameTimer,
     pub(crate) fps: u32, // kept for external access; mirrors frame_timer.fps()
 
@@ -81,7 +76,7 @@ impl App {
         let future_grid_resolutions = voxel.grid_resolutions.clone();
         let model = Model::Bunny;
 
-        let input = WinitInputHelper::new();
+        let input = InputController::new(WinitInputHelper::new());
 
         // Camera setup to frame all three grids.
         let res_f = 1.0f64;
@@ -105,7 +100,6 @@ impl App {
             render_mode: RenderMode::Coord,
             render_scale: 1.0,
             input,
-            focused: false,
             frame_timer: FrameTimer::new(),
             fps: 0,
             rcx: None,
@@ -118,30 +112,13 @@ impl App {
         if let Some(fps) = self.frame_timer.frame() {
             self.fps = fps;
         }
-        let Some(delta_time) = self.input.delta_time().as_ref().map(Duration::as_secs_f64) else {
-            return;
-        };
-        if self.input.close_requested() {
+        if self.input.helper().close_requested() {
             event_loop.exit();
             return;
         }
-        if self.focused {
-            let t = |k: KeyCode| self.input.key_held(k) as u8 as f64;
-            let v = Vector3::new(KeyCode::KeyD, KeyCode::KeyW, KeyCode::KeyQ).map(t)
-                - Vector3::new(KeyCode::KeyA, KeyCode::KeyS, KeyCode::KeyE).map(t);
-            self.camera.position +=
-                (self.camera.rotation_matrix() * v.push(0.0) * delta_time).xyz();
-            let sens = 0.001 * (self.camera.fov.to_radians() * 0.5).tan();
-            let (dx, dy) = self.input.mouse_diff();
-            self.camera.rotation.z -= dx as f64 * sens;
-            self.camera.rotation.x -= dy as f64 * sens;
-            self.camera.rotation.x = self.camera.rotation.x.clamp(-FRAC_PI_2, FRAC_PI_2);
-            self.camera.rotation.y = self.camera.rotation.y.rem_euclid(TAU);
-            let ds = self.input.scroll_diff();
-            let tanfov = (self.camera.fov.to_radians() * 0.5).tan();
-            self.camera.fov = ((tanfov * (ds.1 as f64 * -0.1).exp()).atan() * 2.0).to_degrees();
-        }
         let rcx = self.rcx.as_mut().unwrap();
+        // Update input (camera movement, focus toggles)
+        self.input.update(&mut self.camera, &rcx.window);
         // Drain any completed voxelization results and upload to GPU
         self.voxel.poll(
             self.gpu.descriptor_set_allocator.clone(),
@@ -150,16 +127,6 @@ impl App {
             self.gpu.command_buffer_allocator.clone(),
             self.gpu.queue.clone(),
         );
-        if self.input.mouse_pressed(MouseButton::Left) {
-            self.focused = true;
-            rcx.window.set_cursor_grab(CursorGrabMode::Confined).unwrap();
-            rcx.window.set_cursor_visible(false);
-        }
-        if self.input.key_pressed(KeyCode::Escape) {
-            self.focused = false;
-            rcx.window.set_cursor_grab(CursorGrabMode::None).unwrap();
-            rcx.window.set_cursor_visible(true);
-        }
     }
 
     fn render(&mut self, _event_loop: &ActiveEventLoop) {

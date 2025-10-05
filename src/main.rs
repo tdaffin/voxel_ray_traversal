@@ -6,6 +6,7 @@ mod camera;
 mod frame_timer;
 mod gpu;
 mod hot_reload;
+mod input_controller;
 mod model;
 mod pipelines;
 mod push_constants;
