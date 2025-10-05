@@ -3,6 +3,7 @@ use winit::event_loop::EventLoop;
 mod app;
 mod benchmark;
 mod camera;
+mod frame_renderer;
 mod frame_timer;
 mod gpu;
 mod hot_reload;

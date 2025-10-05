@@ -5,14 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use vulkano::{
     Validated, VulkanError,
-    command_buffer::{
-        AutoCommandBufferBuilder, BlitImageInfo, ClearColorImageInfo, CommandBufferUsage,
-    },
-    image::{
-        sampler::Filter,
-        view::{ImageView, ImageViewCreateInfo},
-    },
-    pipeline::{Pipeline, PipelineBindPoint},
+    image::view::{ImageView, ImageViewCreateInfo},
     swapchain::{Surface, SwapchainPresentInfo, acquire_next_image},
     sync::GpuFuture,
 };
@@ -30,7 +23,8 @@ use crate::frame_timer::FrameTimer;
 use crate::gpu::GpuContext;
 use crate::model::Model;
 use crate::pipelines::PipelineManager;
-use crate::push_constants::{PushConstantsInput, build_push_constants};
+// push_constants now handled inside frame_renderer
+use crate::frame_renderer::record_frame;
 use crate::render_mode::RenderMode;
 use crate::rendering::{RenderContext, get_images_and_sets, get_swapchain_images, load_icon};
 use crate::voxel_job::VoxelManager;
@@ -205,74 +199,20 @@ impl App {
             }
         }
 
-        // Re-borrow render context for the remainder of the standard render path.
+        // Build command buffer via renderer helper
         let rcx = self.rcx.as_mut().unwrap();
-
-        let render_extent = rcx.render_image.extent();
-        let resample_extent = rcx.resample_image.extent();
-        self.camera.extent = [render_extent[0] as f64, render_extent[1] as f64];
-
-        let push_constants = build_push_constants(PushConstantsInput {
-            cam_pixel_to_ray: self.camera.pixel_to_ray_matrix(),
-            voxel: &self.voxel,
-            render_mode: self.render_mode as u32,
-        });
-
-        let mut builder = AutoCommandBufferBuilder::primary(
-            self.gpu.command_buffer_allocator.clone(),
-            self.gpu.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .unwrap();
-
-        builder.clear_color_image(ClearColorImageInfo::image(rcx.render_image.clone())).unwrap();
-
-        builder
-            .bind_pipeline_compute(self.pipelines.render.clone())
-            .unwrap()
-            .push_constants(self.pipelines.render.layout().clone(), 0, push_constants)
-            .unwrap()
-            .bind_descriptor_sets(
-                PipelineBindPoint::Compute,
-                self.pipelines.render.layout().clone(),
-                0,
-                vec![rcx.render_set.clone(), self.voxel.voxel_set.clone()],
-            )
-            .unwrap();
-        unsafe {
-            builder
-                .dispatch([render_extent[0].div_ceil(8), render_extent[1].div_ceil(8), 1])
-                .unwrap();
-        }
-
-        builder
-            .bind_pipeline_compute(self.pipelines.resample.clone())
-            .unwrap()
-            .bind_descriptor_sets(
-                PipelineBindPoint::Compute,
-                self.pipelines.resample.layout().clone(),
-                0,
-                vec![rcx.resample_set.clone()],
-            )
-            .unwrap();
-
-        unsafe {
-            builder
-                .dispatch([resample_extent[0].div_ceil(8), resample_extent[1].div_ceil(8), 1])
-                .unwrap();
-        }
-
-        let mut info = BlitImageInfo::images(
-            rcx.resample_image.clone(),
-            rcx.image_views[image_index as usize].image().clone(),
+        let outputs = record_frame(
+            &self.gpu,
+            &self.pipelines,
+            rcx,
+            &self.voxel,
+            &mut self.camera,
+            self.render_mode as u32,
+            image_index,
         );
-        info.filter = Filter::Nearest;
-        builder.blit_image(info).unwrap();
-
-        let command_buffer = builder.build().unwrap();
 
         let render_future =
-            acquire_future.then_execute(self.gpu.queue.clone(), command_buffer).unwrap();
+            acquire_future.then_execute(self.gpu.queue.clone(), outputs.command_buffer).unwrap();
 
         let gui_future =
             rcx.gui.draw_on_image(render_future, rcx.image_views[image_index as usize].clone());
