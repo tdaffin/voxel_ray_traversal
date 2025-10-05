@@ -4,6 +4,7 @@ mod app;
 mod benchmark;
 mod camera;
 mod frame_timer;
+mod gpu;
 mod hot_reload;
 mod model;
 mod push_constants;

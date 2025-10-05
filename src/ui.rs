@@ -56,8 +56,8 @@ impl App {
                         rcx_for_ui.resample_image,
                         rcx_for_ui.resample_set,
                     ) = get_images_and_sets(
-                        self.memory_allocator.clone(),
-                        self.descriptor_set_allocator.clone(),
+                        self.gpu.memory_allocator.clone(),
+                        self.gpu.descriptor_set_allocator.clone(),
                         &self.render_pipeline,
                         &self.resample_pipeline,
                         render_extent,

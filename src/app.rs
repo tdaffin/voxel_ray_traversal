@@ -7,22 +7,14 @@ use std::{
     time::Duration,
 };
 use vulkano::{
-    Validated, Version, VulkanError, VulkanLibrary,
+    Validated, VulkanError,
     command_buffer::{
         AutoCommandBufferBuilder, BlitImageInfo, ClearColorImageInfo, CommandBufferUsage,
-        allocator::StandardCommandBufferAllocator,
-    },
-    descriptor_set::allocator::StandardDescriptorSetAllocator,
-    device::{
-        Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures, Queue, QueueCreateInfo,
-        QueueFlags, physical::PhysicalDeviceType,
     },
     image::{
         sampler::Filter,
         view::{ImageView, ImageViewCreateInfo},
     },
-    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
-    memory::allocator::StandardMemoryAllocator,
     pipeline::{Pipeline, PipelineBindPoint},
     swapchain::{Surface, SwapchainCreateInfo, SwapchainPresentInfo, acquire_next_image},
     sync::GpuFuture,
@@ -39,26 +31,19 @@ use winit_input_helper::WinitInputHelper;
 
 use crate::camera::Camera;
 use crate::frame_timer::FrameTimer;
+use crate::gpu::GpuContext;
 use crate::hot_reload::HotReloadComputePipeline;
 use crate::model::Model;
 use crate::push_constants::{PushConstantsInput, build_push_constants};
 use crate::render_mode::RenderMode;
-use crate::rendering::{
-    RenderContext, get_allocators, get_images_and_sets, get_swapchain_images, load_icon,
-};
+use crate::rendering::{RenderContext, get_images_and_sets, get_swapchain_images, load_icon};
 use crate::voxel_job::VoxelManager;
 
 const INITIAL_VOXEL_RESOLUTION: u32 = 24;
 const INITIAL_WINDOW_RESOLUTION: PhysicalSize<u32> = PhysicalSize::new(960, 960);
 
 pub struct App {
-    instance: Arc<Instance>,
-    device: Arc<Device>,
-    queue: Arc<Queue>,
-
-    pub(crate) memory_allocator: Arc<StandardMemoryAllocator>,
-    pub(crate) descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    pub(crate) gpu: GpuContext,
 
     pub(crate) render_pipeline: HotReloadComputePipeline,
     pub(crate) resample_pipeline: HotReloadComputePipeline,
@@ -82,101 +67,25 @@ pub struct App {
 
 impl App {
     pub fn new(event_loop: &EventLoop<()>) -> Self {
-        let library = VulkanLibrary::new().unwrap();
-
-        let mut required_extensions = Surface::required_extensions(event_loop).unwrap();
-
-        required_extensions.ext_debug_utils = true;
-
-        let instance = Instance::new(
-            library,
-            InstanceCreateInfo {
-                flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
-                enabled_extensions: required_extensions,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let mut device_extensions =
-            DeviceExtensions { khr_swapchain: true, ..DeviceExtensions::empty() };
-
-        let (physical_device, queue_family_index) = instance
-            .enumerate_physical_devices()
-            .unwrap()
-            .filter(|p| {
-                p.api_version() >= Version::V1_3 || p.supported_extensions().khr_dynamic_rendering
-            })
-            .filter(|p| p.supported_extensions().contains(&device_extensions))
-            .filter_map(|p| {
-                p.queue_family_properties()
-                    .iter()
-                    .enumerate()
-                    .position(|(i, q)| {
-                        q.queue_flags.intersects(QueueFlags::GRAPHICS)
-                            && p.presentation_support(i as u32, event_loop).unwrap()
-                    })
-                    .map(|i| (p, i as u32))
-            })
-            .min_by_key(|(p, _)| match p.properties().device_type {
-                PhysicalDeviceType::DiscreteGpu => 0,
-                PhysicalDeviceType::IntegratedGpu => 1,
-                PhysicalDeviceType::VirtualGpu => 2,
-                PhysicalDeviceType::Cpu => 3,
-                PhysicalDeviceType::Other => 4,
-                _ => 5,
-            })
-            .unwrap();
-
-        println!(
-            "Using device: {} (type: {:?})",
-            physical_device.properties().device_name,
-            physical_device.properties().device_type,
-        );
-
-        if physical_device.api_version() < Version::V1_3 {
-            device_extensions.khr_dynamic_rendering = true;
-        }
-
-        let (device, mut queues) = Device::new(
-            physical_device,
-            DeviceCreateInfo {
-                queue_create_infos: vec![QueueCreateInfo {
-                    queue_family_index,
-                    ..Default::default()
-                }],
-                enabled_extensions: device_extensions,
-                enabled_features: DeviceFeatures {
-                    dynamic_rendering: true,
-                    ..DeviceFeatures::empty()
-                },
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let queue = queues.next().unwrap();
-
-        let (memory_allocator, descriptor_set_allocator, command_buffer_allocator) =
-            get_allocators(&device);
+        let gpu = GpuContext::new(event_loop);
 
         let shaders_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
         let render_pipeline =
-            HotReloadComputePipeline::new(device.clone(), &shaders_dir.join("traverse.comp"));
+            HotReloadComputePipeline::new(gpu.device.clone(), &shaders_dir.join("traverse.comp"));
         let render_pipeline_branchless = HotReloadComputePipeline::with_defines(
-            device.clone(),
+            gpu.device.clone(),
             &shaders_dir.join("traverse.comp"),
             vec![("BRANCHLESS_TRAVERSAL".to_string(), None::<String>)],
         );
         let resample_pipeline =
-            HotReloadComputePipeline::new(device.clone(), &shaders_dir.join("resample.comp"));
+            HotReloadComputePipeline::new(gpu.device.clone(), &shaders_dir.join("resample.comp"));
 
         let voxel = VoxelManager::new(
             INITIAL_VOXEL_RESOLUTION,
-            memory_allocator.clone(),
-            descriptor_set_allocator.clone(),
-            command_buffer_allocator.clone(),
-            queue.clone(),
+            gpu.memory_allocator.clone(),
+            gpu.descriptor_set_allocator.clone(),
+            gpu.command_buffer_allocator.clone(),
+            gpu.queue.clone(),
             &render_pipeline,
         );
         let future_grid_resolutions = voxel.grid_resolutions.clone();
@@ -197,12 +106,7 @@ impl App {
         camera.look_at(target);
 
         App {
-            instance,
-            device,
-            queue,
-            memory_allocator,
-            descriptor_set_allocator,
-            command_buffer_allocator,
+            gpu,
             render_pipeline,
             render_pipeline_branchless,
             resample_pipeline,
@@ -252,11 +156,11 @@ impl App {
         let rcx = self.rcx.as_mut().unwrap();
         // Drain any completed voxelization results and upload to GPU
         self.voxel.poll(
-            self.descriptor_set_allocator.clone(),
+            self.gpu.descriptor_set_allocator.clone(),
             &self.render_pipeline,
-            self.memory_allocator.clone(),
-            self.command_buffer_allocator.clone(),
-            self.queue.clone(),
+            self.gpu.memory_allocator.clone(),
+            self.gpu.command_buffer_allocator.clone(),
+            self.gpu.queue.clone(),
         );
         if self.input.mouse_pressed(MouseButton::Left) {
             self.focused = true;
@@ -306,8 +210,8 @@ impl App {
                 ];
                 (rcx.render_image, rcx.render_set, rcx.resample_image, rcx.resample_set) =
                     get_images_and_sets(
-                        self.memory_allocator.clone(),
-                        self.descriptor_set_allocator.clone(),
+                        self.gpu.memory_allocator.clone(),
+                        self.gpu.descriptor_set_allocator.clone(),
                         &self.render_pipeline,
                         &self.resample_pipeline,
                         render_extent,
@@ -339,10 +243,10 @@ impl App {
             // Copy future per-grid resolutions into active ones (truncate/extend safely)
             self.voxel.future_grid_resolutions = self.future_grid_resolutions.clone();
             self.voxel.regenerate(
-                self.descriptor_set_allocator.clone(),
-                self.memory_allocator.clone(),
-                self.command_buffer_allocator.clone(),
-                self.queue.clone(),
+                self.gpu.descriptor_set_allocator.clone(),
+                self.gpu.memory_allocator.clone(),
+                self.gpu.command_buffer_allocator.clone(),
+                self.gpu.queue.clone(),
                 &self.render_pipeline,
                 8,
             );
@@ -358,10 +262,10 @@ impl App {
                 render_mode: self.render_mode as u32,
                 branching_pipeline: self.render_pipeline.clone(),
                 branchless_pipeline: self.render_pipeline_branchless.clone(),
-                queue: self.queue.clone(),
-                command_buffer_allocator: self.command_buffer_allocator.clone(),
+                queue: self.gpu.queue.clone(),
+                command_buffer_allocator: self.gpu.command_buffer_allocator.clone(),
                 rcx: rcx_ref,
-                device: self.device.clone(),
+                device: self.gpu.device.clone(),
             });
             println!("Benchmark Results ({} frames each):", outcome.frames);
             println!("  Branching traversal avg frame CPU: {:?}", outcome.branching_cpu_avg);
@@ -388,8 +292,8 @@ impl App {
         });
 
         let mut builder = AutoCommandBufferBuilder::primary(
-            self.command_buffer_allocator.clone(),
-            self.queue.queue_family_index(),
+            self.gpu.command_buffer_allocator.clone(),
+            self.gpu.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )
         .unwrap();
@@ -441,14 +345,14 @@ impl App {
         let command_buffer = builder.build().unwrap();
 
         let render_future =
-            acquire_future.then_execute(self.queue.clone(), command_buffer).unwrap();
+            acquire_future.then_execute(self.gpu.queue.clone(), command_buffer).unwrap();
 
         let gui_future =
             rcx.gui.draw_on_image(render_future, rcx.image_views[image_index as usize].clone());
 
         gui_future
             .then_swapchain_present(
-                self.queue.clone(),
+                self.gpu.queue.clone(),
                 SwapchainPresentInfo::swapchain_image_index(rcx.swapchain.clone(), image_index),
             )
             .then_signal_fence_and_flush()
@@ -470,9 +374,9 @@ impl ApplicationHandler for App {
                 )
                 .unwrap(),
         );
-        let surface = Surface::from_window(self.instance.clone(), window.clone()).unwrap();
+        let surface = Surface::from_window(self.gpu.instance.clone(), window.clone()).unwrap();
 
-        let (swapchain, images) = get_swapchain_images(&self.device, &surface, &window);
+        let (swapchain, images) = get_swapchain_images(&self.gpu.device, &surface, &window);
         let image_views = images
             .iter()
             .map(|i| ImageView::new(i.clone(), ImageViewCreateInfo::from_image(i)).unwrap())
@@ -484,8 +388,8 @@ impl ApplicationHandler for App {
             (window_extent[1] as f32 * self.render_scale) as u32,
         ];
         let (render_image, render_set, resample_image, resample_set) = get_images_and_sets(
-            self.memory_allocator.clone(),
-            self.descriptor_set_allocator.clone(),
+            self.gpu.memory_allocator.clone(),
+            self.gpu.descriptor_set_allocator.clone(),
             &self.render_pipeline,
             &self.resample_pipeline,
             render_extent,
@@ -495,7 +399,7 @@ impl ApplicationHandler for App {
         let gui = Gui::new(
             event_loop,
             surface,
-            self.queue.clone(),
+            self.gpu.queue.clone(),
             swapchain.image_format(),
             GuiConfig { is_overlay: true, ..Default::default() },
         );
