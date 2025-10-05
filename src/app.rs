@@ -1,0 +1,918 @@
+use std::path::PathBuf;
+use std::{
+    f64::consts::{FRAC_PI_2, TAU},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+// Added nalgebra imports for math types used throughout this file.
+use nalgebra::{Matrix4, Vector3, Vector4};
+// Egui integration (Gui / GuiConfig) and types
+use egui_winit_vulkano::{egui::{self, Color32}, Gui, GuiConfig};
+use vulkano::{
+    Validated, Version, VulkanError, VulkanLibrary,
+    buffer::BufferContents,
+    command_buffer::{
+        AutoCommandBufferBuilder, BlitImageInfo, ClearColorImageInfo, CommandBufferUsage,
+        allocator::StandardCommandBufferAllocator,
+    },
+    descriptor_set::{DescriptorSet, allocator::StandardDescriptorSetAllocator},
+    device::{
+        Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures, Queue, QueueCreateInfo,
+        QueueFlags, physical::PhysicalDeviceType,
+    },
+    image::{
+        sampler::Filter,
+        view::{ImageView, ImageViewCreateInfo},
+    },
+    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
+    memory::allocator::StandardMemoryAllocator,
+    pipeline::{ComputePipeline, Pipeline, PipelineBindPoint},
+    swapchain::{Surface, SwapchainCreateInfo, SwapchainPresentInfo, acquire_next_image},
+    sync::GpuFuture,
+};
+use winit::dpi::PhysicalSize;
+use winit::{
+    application::ApplicationHandler,
+    event::{DeviceEvent, DeviceId, MouseButton, WindowEvent},
+    event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::KeyCode,
+    window::{CursorGrabMode, Window, WindowId},
+};
+use winit_input_helper::WinitInputHelper;
+
+use crate::camera::Camera;
+use crate::hot_reload::HotReloadComputePipeline;
+use crate::model::Model;
+use crate::render_mode::RenderMode;
+use crate::rendering::{RenderContext, get_images_and_sets, load_icon, get_allocators, get_swapchain_images};
+use crate::voxel::{build_voxel_descriptor_set, create_empty_voxel_placeholder};
+use crate::voxelize;
+use crate::voxel_job::VoxelJobMessage;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+
+
+const INITIAL_VOXEL_RESOLUTION: u32 = 24;
+const INITIAL_WINDOW_RESOLUTION: PhysicalSize<u32> = PhysicalSize::new(960, 960);
+
+
+pub struct App {
+    instance: Arc<Instance>,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+
+    memory_allocator: Arc<StandardMemoryAllocator>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+
+    render_pipeline: HotReloadComputePipeline,
+    resample_pipeline: HotReloadComputePipeline,
+    render_pipeline_branchless: HotReloadComputePipeline,
+    // Restored voxel-related fields
+    voxel_set: Arc<DescriptorSet>,
+    voxel_resolution: u32,
+    grid_resolutions: Vec<u32>,
+    future_grid_resolutions: Vec<u32>,
+    model: Model,
+    active_voxel_grids: u32,
+    voxel_result_rx: Receiver<VoxelJobMessage>,
+    
+    voxel_views: Vec<Option<Arc<ImageView>>>,
+    placeholder_view: Arc<ImageView>,
+    voxel_pending: Vec<bool>,
+    voxel_generation: u64,
+    cancel_requested: bool,
+    voxel_cancel_flag: Arc<AtomicBool>,
+    voxel_progress: Vec<(usize, usize)>, // (done,total)
+
+    camera: Camera,
+    render_mode: RenderMode,
+    render_scale: f32,
+
+    input: WinitInputHelper,
+    focused: bool,
+    last_second: Instant,
+    frames_since_last_second: u32,
+    fps: u32,
+
+    rcx: Option<RenderContext>,
+}
+
+
+impl App {
+    pub fn new(event_loop: &EventLoop<()>) -> Self {
+        let library = VulkanLibrary::new().unwrap();
+
+        let mut required_extensions = Surface::required_extensions(event_loop).unwrap();
+
+        required_extensions.ext_debug_utils = true;
+
+        let instance = Instance::new(
+            library,
+            InstanceCreateInfo {
+                flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
+                enabled_extensions: required_extensions,
+                ..Default::default()
+            },
+    )
+    .unwrap();
+
+    let mut device_extensions = DeviceExtensions {
+            khr_swapchain: true,
+            ..DeviceExtensions::empty()
+        };
+
+        let (physical_device, queue_family_index) = instance
+            .enumerate_physical_devices()
+            .unwrap()
+            .filter(|p| {
+                p.api_version() >= Version::V1_3 || p.supported_extensions().khr_dynamic_rendering
+            })
+            .filter(|p| p.supported_extensions().contains(&device_extensions))
+            .filter_map(|p| {
+                p.queue_family_properties()
+                    .iter()
+                    .enumerate()
+                    .position(|(i, q)| {
+                        q.queue_flags.intersects(QueueFlags::GRAPHICS)
+                            && p.presentation_support(i as u32, event_loop).unwrap()
+                    })
+                    .map(|i| (p, i as u32))
+            })
+            .min_by_key(|(p, _)| match p.properties().device_type {
+                PhysicalDeviceType::DiscreteGpu => 0,
+                PhysicalDeviceType::IntegratedGpu => 1,
+                PhysicalDeviceType::VirtualGpu => 2,
+                PhysicalDeviceType::Cpu => 3,
+                PhysicalDeviceType::Other => 4,
+                _ => 5,
+            })
+            .unwrap();
+
+        println!(
+            "Using device: {} (type: {:?})",
+            physical_device.properties().device_name,
+            physical_device.properties().device_type,
+        );
+
+        if physical_device.api_version() < Version::V1_3 {
+            device_extensions.khr_dynamic_rendering = true;
+        }
+
+        let (device, mut queues) = Device::new(
+            physical_device,
+            DeviceCreateInfo {
+                queue_create_infos: vec![QueueCreateInfo {
+                    queue_family_index,
+                    ..Default::default()
+                }],
+                enabled_extensions: device_extensions,
+                enabled_features: DeviceFeatures {
+                    dynamic_rendering: true,
+                    ..DeviceFeatures::empty()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let queue = queues.next().unwrap();
+
+        let (memory_allocator, descriptor_set_allocator, command_buffer_allocator) =
+            get_allocators(&device);
+
+        let shaders_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
+        let render_pipeline = HotReloadComputePipeline::new(
+            device.clone(),
+            &shaders_dir.join("traverse.comp"),
+        );
+        let render_pipeline_branchless = HotReloadComputePipeline::with_defines(
+            device.clone(),
+            &shaders_dir.join("traverse.comp"),
+            vec![("BRANCHLESS_TRAVERSAL".to_string(), None::<String>)],
+        );
+        let resample_pipeline =
+            HotReloadComputePipeline::new(device.clone(), &shaders_dir.join("resample.comp"));
+
+    let voxel_resolution = INITIAL_VOXEL_RESOLUTION;
+    let grid_resolutions = vec![voxel_resolution; Model::ALL.len()];
+    let future_grid_resolutions = grid_resolutions.clone();
+        let model = Model::Bunny;
+        // Start with a single placeholder so we can build a descriptor set immediately.
+        let placeholder_view = create_empty_voxel_placeholder(
+            memory_allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            voxel_resolution,
+        );
+        let voxel_set = build_voxel_descriptor_set(
+            descriptor_set_allocator.clone(),
+            &render_pipeline,
+            std::slice::from_ref(&placeholder_view),
+        );
+        // Channel for background voxelization results (model_index, voxel data)
+        let (tx, rx) = mpsc::channel();
+    let voxel_generation = 1u64;
+        for (idx, model) in Model::ALL.iter().enumerate() {
+            let tx = tx.clone();
+            let path = model.path().as_ref().to_path_buf();
+            let res = grid_resolutions[idx];
+            let generation_id = voxel_generation;
+            thread::spawn(move || {
+                let vox = voxelize::ply_to_voxels(path, res); // initial sync path (no progress)
+                let _ = tx.send(VoxelJobMessage::Finished { generation: generation_id, index: idx, data: vox });
+            });
+        }
+        drop(tx); // close extra sender
+    let voxel_views: Vec<Option<Arc<ImageView>>> = vec![None; Model::ALL.len()];
+    let voxel_pending = vec![true; Model::ALL.len()];
+    let voxel_progress = vec![(0,0); Model::ALL.len()];
+    let voxel_cancel_flag = Arc::new(AtomicBool::new(false));
+        let active_voxel_grids = Model::ALL.len() as u32;
+
+        let input = WinitInputHelper::new();
+
+        // Camera setup to frame all three grids.
+        let res_f = 1.0f64;
+        let spacing = res_f * 0.25; // matches shader
+        let stride = res_f + spacing;
+        let target = Vector3::new(stride, res_f * 0.5, res_f * 0.5);
+        let total_width = 2.0 * stride + res_f;
+        let dist = total_width * 1.2;
+        let cam_pos = target + Vector3::new(-dist, dist * 0.6, dist * 0.8);
+        let mut camera = Camera::new(
+            cam_pos,
+            Vector3::zeros(),
+            INITIAL_WINDOW_RESOLUTION.into(),
+            35.0,
+        );
+        camera.look_at(target);
+
+        App {
+            instance,
+            device,
+            queue,
+            memory_allocator,
+            descriptor_set_allocator,
+            command_buffer_allocator,
+            render_pipeline,
+            render_pipeline_branchless,
+            resample_pipeline,
+            voxel_set,
+            voxel_resolution,
+            grid_resolutions,
+            future_grid_resolutions,
+            model,
+            active_voxel_grids,
+            voxel_result_rx: rx,
+            voxel_views,
+            placeholder_view,
+            voxel_pending,
+            voxel_generation,
+            cancel_requested: false,
+            voxel_cancel_flag,
+            voxel_progress,
+            camera,
+            render_mode: RenderMode::Coord,
+            render_scale: 1.0,
+            input,
+            focused: false,
+            last_second: Instant::now(),
+            frames_since_last_second: 0,
+            fps: 0,
+            rcx: None,
+        }
+
+    }
+
+    fn start_background_voxelization(&mut self) {
+        // Clear previous state
+        for v in &mut self.voxel_views { *v = None; }
+        self.active_voxel_grids = 0;
+    self.voxel_generation = self.voxel_generation.wrapping_add(1);
+        self.voxel_pending.fill(true);
+        self.cancel_requested = false;
+    self.voxel_cancel_flag.store(false, Ordering::Relaxed);
+    for p in &mut self.voxel_progress { *p = (0,0); }
+        // Build a descriptor set with just the placeholder (already exists as first fallback)
+        self.voxel_set = build_voxel_descriptor_set(
+            self.descriptor_set_allocator.clone(),
+            &self.render_pipeline,
+            std::slice::from_ref(&self.placeholder_view),
+        );
+        let (tx, rx) = mpsc::channel();
+        self.voxel_result_rx = rx;
+        let generation_id = self.voxel_generation;
+        let cancel_flag = self.voxel_cancel_flag.clone();
+        for (idx, model) in Model::ALL.iter().enumerate() {
+            let txc = tx.clone();
+            let path = model.path().as_ref().to_path_buf();
+            let gen_thread = generation_id;
+            let cancel_local = cancel_flag.clone();
+            let res_for_grid = self.grid_resolutions[idx];
+            thread::spawn(move || {
+                use voxelize::{ply_to_voxels_with_progress, VoxelProgressCallbacks};
+                let cancelled = cancel_local.clone();
+                let prog_cb = VoxelProgressCallbacks {
+                    cancelled: &cancelled,
+                    progress: Some(Box::new({
+                        let txp = txc.clone();
+                        move |done,total| {
+                            let _ = txp.send(VoxelJobMessage::Progress { generation: gen_thread, index: idx, done, total });
+                        }
+                    })),
+                };
+                if let Some(vox) = ply_to_voxels_with_progress(path, res_for_grid, prog_cb) {
+                    if !cancelled.load(Ordering::Relaxed) {
+                        let _ = txc.send(VoxelJobMessage::Finished { generation: gen_thread, index: idx, data: vox });
+                    } else {
+                        let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
+                    }
+                } else {
+                    let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
+                }
+            });
+        }
+        // drop original sender so channel closes when all jobs done
+        drop(tx);
+    }
+
+    fn update(&mut self, event_loop: &ActiveEventLoop) {
+        self.frames_since_last_second += 1;
+        let now = Instant::now();
+    if now.duration_since(self.last_second) >= Duration::from_secs(1) {
+            self.fps = self.frames_since_last_second;
+            self.frames_since_last_second = 0;
+            self.last_second = now;
+        }
+        let Some(delta_time) = self.input.delta_time().as_ref().map(Duration::as_secs_f64) else { return; };
+        if self.input.close_requested() { event_loop.exit(); return; }
+        if self.focused {
+            let t = |k: KeyCode| self.input.key_held(k) as u8 as f64;
+            let v = Vector3::new(KeyCode::KeyD, KeyCode::KeyW, KeyCode::KeyQ).map(t)
+                - Vector3::new(KeyCode::KeyA, KeyCode::KeyS, KeyCode::KeyE).map(t);
+            self.camera.position += (self.camera.rotation_matrix() * v.push(0.0) * delta_time).xyz();
+            let sens = 0.001 * (self.camera.fov.to_radians() * 0.5).tan();
+            let (dx, dy) = self.input.mouse_diff();
+            self.camera.rotation.z -= dx as f64 * sens;
+            self.camera.rotation.x -= dy as f64 * sens;
+            self.camera.rotation.x = self.camera.rotation.x.clamp(-FRAC_PI_2, FRAC_PI_2);
+            self.camera.rotation.y = self.camera.rotation.y.rem_euclid(TAU);
+            let ds = self.input.scroll_diff();
+            let tanfov = (self.camera.fov.to_radians() * 0.5).tan();
+            self.camera.fov = ((tanfov * (ds.1 as f64 * -0.1).exp()).atan() * 2.0).to_degrees();
+        }
+        let rcx = self.rcx.as_mut().unwrap();
+        // Drain any completed voxelization results and upload to GPU
+        while let Ok(msg) = self.voxel_result_rx.try_recv() {
+            match msg {
+                VoxelJobMessage::Progress { generation, index, done, total } => {
+                    if generation != self.voxel_generation { continue; }
+                    if index < self.voxel_progress.len() { self.voxel_progress[index] = (done,total); }
+                }
+                VoxelJobMessage::Finished { generation, index, data } => {
+                    if generation != self.voxel_generation { continue; }
+                    if self.cancel_requested { continue; }
+                    if index < self.voxel_views.len() {
+                        let view = crate::voxel::create_voxel_image_view(
+                            self.memory_allocator.clone(),
+                            self.command_buffer_allocator.clone(),
+                            self.queue.clone(),
+                            data,
+                            self.voxel_resolution,
+                        );
+                        self.voxel_views[index] = Some(view);
+                        self.voxel_pending[index] = false;
+                    }
+                }
+                VoxelJobMessage::Cancelled { generation } => {
+                    if generation != self.voxel_generation { continue; }
+                    // Mark all pending as false if global cancel to stop spinner display
+                    if self.cancel_requested { self.voxel_pending.fill(false); }
+                }
+            }
+            // Rebuild descriptor set with contiguous ready views from start after any change
+            let mut ready: Vec<Arc<ImageView>> = Vec::new();
+            for opt in &self.voxel_views {
+                match opt { Some(v) => ready.push(v.clone()), None => break }
+            }
+            self.active_voxel_grids = ready.len() as u32;
+            if self.active_voxel_grids > 0 {
+                let voxel_set = build_voxel_descriptor_set(
+                    self.descriptor_set_allocator.clone(),
+                    &self.render_pipeline,
+                    &ready,
+                );
+                self.voxel_set = voxel_set;
+            }
+        }
+        if self.input.mouse_pressed(MouseButton::Left) {
+            self.focused = true;
+            rcx.window.set_cursor_grab(CursorGrabMode::Confined).unwrap();
+            rcx.window.set_cursor_visible(false);
+        }
+        if self.input.key_pressed(KeyCode::Escape) {
+            self.focused = false;
+            rcx.window.set_cursor_grab(CursorGrabMode::None).unwrap();
+            rcx.window.set_cursor_visible(true);
+        }
+    }
+
+    fn render(&mut self, _event_loop: &ActiveEventLoop) {
+        self.render_pipeline.maybe_reload();
+        self.resample_pipeline.maybe_reload();
+        self.render_pipeline_branchless.maybe_reload();
+
+        {
+            let rcx = self.rcx.as_mut().unwrap();
+            if self.input.window_resized().is_some() {
+                rcx.recreate_swapchain = true;
+            }
+            let window_size = rcx.window.inner_size();
+
+            if window_size.width == 0 || window_size.height == 0 {
+                return;
+            }
+
+            if rcx.recreate_swapchain {
+                let images;
+                (rcx.swapchain, images) = rcx
+                    .swapchain
+                    .recreate(SwapchainCreateInfo {
+                        image_extent: window_size.into(),
+                        ..rcx.swapchain.create_info()
+                    })
+                    .unwrap();
+                rcx.image_views = images
+                    .iter()
+                    .map(|i| ImageView::new(i.clone(), ImageViewCreateInfo::from_image(i)).unwrap())
+                    .collect();
+                let window_extent: [u32; 2] = window_size.into();
+                let render_extent = [
+                    (window_extent[0] as f32 * self.render_scale) as u32,
+                    (window_extent[1] as f32 * self.render_scale) as u32,
+                ];
+                (
+                    rcx.render_image,
+                    rcx.render_set,
+                    rcx.resample_image,
+                    rcx.resample_set,
+                ) = get_images_and_sets(
+                    self.memory_allocator.clone(),
+                    self.descriptor_set_allocator.clone(),
+                    &self.render_pipeline,
+                    &self.resample_pipeline,
+                    render_extent,
+                    window_extent,
+                );
+                rcx.recreate_swapchain = false;
+            }
+        }
+
+        let (image_index, suboptimal, acquire_future) = {
+            let rcx = self.rcx.as_mut().unwrap();
+            match acquire_next_image(rcx.swapchain.clone(), None).map_err(Validated::unwrap) {
+                Ok(r) => r,
+                Err(VulkanError::OutOfDate) => {
+                    self.rcx.as_mut().unwrap().recreate_swapchain = true;
+                    return;
+                }
+                Err(e) => panic!("failed to acquire next image: {e}"),
+            }
+        };
+
+        if suboptimal {
+            self.rcx.as_mut().unwrap().recreate_swapchain = true;
+        }
+
+        let mut trigger_benchmark = false;
+    let rcx_for_ui = self.rcx.as_mut().unwrap();
+    // Defer actions requiring &mut self after UI closure to avoid borrow conflicts.
+    let mut request_regen_voxels = false;
+    rcx_for_ui.gui.immediate_ui(|gui| {
+            let ctx = gui.context();
+
+            egui::Window::new("Settings").show(&ctx, |ui| {
+                ui.style_mut().spacing.slider_width = 250.0;
+                ui.horizontal(|ui| {
+                    for &mode in RenderMode::ALL {
+                        ui.selectable_value(&mut self.render_mode, mode, format!("{:?}", mode));
+                    }
+                });
+                ui.separator();
+                ui.add(egui::Slider::new(&mut self.active_voxel_grids, 1..=Model::ALL.len() as u32).text("Active Grids"));
+                if ui.button("Benchmark Traversal Variants").clicked() {
+                    trigger_benchmark = true;
+                }
+                ui.add(egui::Slider::new(&mut self.camera.fov, 0.0..=180.0).text("FOV"));
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.render_scale, 0.125..=8.0).text("Render Scale"),
+                    )
+                    .changed()
+                {
+                    let window_extent: [u32; 2] = rcx_for_ui.window.inner_size().into();
+                    let render_extent = [
+                        (window_extent[0] as f32 * self.render_scale) as u32,
+                        (window_extent[1] as f32 * self.render_scale) as u32,
+                    ];
+                    (
+                        rcx_for_ui.render_image,
+                        rcx_for_ui.render_set,
+                        rcx_for_ui.resample_image,
+                        rcx_for_ui.resample_set,
+                    ) = get_images_and_sets(
+                        self.memory_allocator.clone(),
+                        self.descriptor_set_allocator.clone(),
+                        &self.render_pipeline,
+                        &self.resample_pipeline,
+                        render_extent,
+                        window_extent,
+                    );
+                }
+
+                ui.colored_label(Color32::LIGHT_RED, "Warning: Very high resolutions may exhaust GPU memory.");
+                ui.label("Each grid can now have its own resolution (multiple of 8).");
+                for i in 0..self.future_grid_resolutions.len() {
+                    let mut val = self.future_grid_resolutions[i];
+                    let label = format!("Grid {i} Res");
+                    if ui.add(egui::Slider::new(&mut val, 8..=4096).text(label)).changed() {
+                        val = val.div_ceil(8) * 8;
+                        self.future_grid_resolutions[i] = val;
+                    }
+                }
+                ui.horizontal(|ui| {
+                    for &model in Model::ALL {
+                        ui.selectable_value(&mut self.model, model, format!("{:?}", model));
+                    }
+                });
+                if ui.button("Regenerate Grids").clicked() { request_regen_voxels = true; }
+                if ui.button("Cancel Voxelization").clicked() {
+                    self.cancel_requested = true;
+                    self.voxel_cancel_flag.store(true, Ordering::Relaxed);
+                }
+                ui.separator();
+                // Progress overview
+                let total = self.voxel_pending.len();
+                let remaining = self.voxel_pending.iter().filter(|b| **b).count();
+                ui.label(format!("Voxelization: {} / {} finished", total - remaining, total));
+                for (i, (done,total_tris)) in self.voxel_progress.iter().enumerate() {
+                    let (d,t) = (*done,*total_tris);
+                    let pct = if t>0 { (d as f32 / t as f32 * 100.0).min(100.0) } else { 0.0 };
+                    let status = if self.voxel_pending[i] { if t>0 { format!("{pct:.1}%") } else { "…".into() } } else { "✓".into() };
+                    ui.label(format!("Grid {i}: {status}"));
+                }
+            });
+            egui::Window::new("Stats").show(&ctx, |ui| {
+                fn format_with_commas(n: u64) -> String {
+                    let mut s = n.to_string();
+
+                    let mut i = 3;
+                    while i < s.len() {
+                        s.insert(s.len() - i, ',');
+                        i += 4;
+                    }
+
+                    s
+                }
+
+                ui.label(format!("FPS: {}", self.fps));
+
+                let voxel_resolution = self.voxel_resolution as u64;
+                ui.label(format!(
+                    "Voxels: {}³ = {}",
+                    format_with_commas(voxel_resolution),
+                    format_with_commas(voxel_resolution.pow(3))
+                ));
+                let window_extent: [u32; 2] = rcx_for_ui.window.inner_size().into();
+                let render_extent = [
+                    (window_extent[0] as f32 * self.render_scale) as u32,
+                    (window_extent[1] as f32 * self.render_scale) as u32,
+                ];
+                ui.label(format!(
+                    "Pixels: {}×{} = {}",
+                    format_with_commas(window_extent[0] as u64),
+                    format_with_commas(window_extent[1] as u64),
+                    format_with_commas((window_extent[0] * window_extent[1]) as u64)
+                ));
+                ui.label(format!(
+                    "Rays: {}×{} = {}",
+                    format_with_commas(render_extent[0] as u64),
+                    format_with_commas(render_extent[1] as u64),
+                    format_with_commas((render_extent[0] * render_extent[1]) as u64)
+                ));
+            });
+        });
+    if request_regen_voxels {
+        // Copy future per-grid resolutions into active ones (truncate/extend safely)
+        for (i, r) in self.future_grid_resolutions.clone().into_iter().enumerate() {
+            if i < self.grid_resolutions.len() { self.grid_resolutions[i] = r.div_ceil(8) * 8; }
+        }
+        // Keep legacy voxel_resolution for placeholder scaling / camera framing using max grid size for now
+        if let Some(maxr) = self.grid_resolutions.iter().copied().max() { self.voxel_resolution = maxr; }
+        // Placeholder minimized to 8 regardless of targets
+        let placeholder_res = 8u32;
+        self.placeholder_view = create_empty_voxel_placeholder(
+            self.memory_allocator.clone(),
+            self.command_buffer_allocator.clone(),
+            self.queue.clone(),
+            placeholder_res,
+        );
+        self.start_background_voxelization();
+    }
+
+        if trigger_benchmark {
+            use std::time::Instant;
+            let frames = 30u32;
+            let branching_pipe: Arc<ComputePipeline> = self.render_pipeline.clone();
+            let branchless_pipe: Arc<ComputePipeline> = self.render_pipeline_branchless.clone();
+            let mut run_variant = |pipe: Arc<ComputePipeline>| {
+                let mut total_cpu = Duration::ZERO;
+                let mut total_gpu_ns_accum: f64 = 0.0;
+                use vulkano::query::{QueryPool, QueryPoolCreateInfo, QueryType, QueryResultFlags};
+                use vulkano::sync::PipelineStage;
+                let timestamp_period = self.device.physical_device().properties().timestamp_period; // nanoseconds per tick (f32)
+                let supports_timestamps = self.device.physical_device().queue_family_properties()[self.queue.queue_family_index() as usize].timestamp_valid_bits.is_some();
+                let query_pool = if supports_timestamps { Some(QueryPool::new(self.device.clone(), QueryPoolCreateInfo { query_count: frames * 2, ..QueryPoolCreateInfo::query_type(QueryType::Timestamp) }).unwrap()) } else { None };
+                for f in 0..frames {
+                    let rcx = self.rcx.as_mut().unwrap();
+                    let (image_index, suboptimal, acquire_future) = match acquire_next_image(rcx.swapchain.clone(), None).map_err(Validated::unwrap) { Ok(r)=>r, Err(_)=>break};
+                    if suboptimal { rcx.recreate_swapchain = true; }
+                    let render_extent = rcx.render_image.extent();
+                    let pixel_to_ray = self.camera.pixel_to_ray_matrix();
+                    let size = self.voxel_resolution as f64;
+                    let mut scale_and_center = Matrix4::from_diagonal(&Vector4::from_element(size));
+                    scale_and_center.set_column(3, &Vector3::from_element(0.5 * size).push(1.0));
+                    let pixel_to_ray = scale_and_center * pixel_to_ray;
+                    #[derive(BufferContents)]
+                    #[repr(C)]
+                    struct PushConstants { pixel_to_ray: Matrix4<f32>, voxel_count: u32, render_mode: u32, _pad:[u32;2], resolutions:[u32;3] }
+                    // Clamp to 3 since shader only declares space for 3 grids now
+                    let voxel_count = self.active_voxel_grids.min(Model::ALL.len() as u32).max(1).min(3);
+                    let mut resolutions = [0u32;3];
+                    for (i,r) in self.grid_resolutions.iter().take(3).enumerate() { resolutions[i]=*r; }
+                    if voxel_count as usize > self.grid_resolutions.len() { resolutions[0]=self.voxel_resolution; }
+                    let push_constants = PushConstants { pixel_to_ray: pixel_to_ray.cast(), voxel_count, render_mode: self.render_mode as u32, _pad:[0,0], resolutions };
+                    let mut builder = AutoCommandBufferBuilder::primary(
+                        self.command_buffer_allocator.clone(),
+                        self.queue.queue_family_index(),
+                        CommandBufferUsage::OneTimeSubmit,
+                    ).unwrap();
+                    builder.clear_color_image(ClearColorImageInfo::image(rcx.render_image.clone())).unwrap();
+                    if let Some(qp) = &query_pool { unsafe { builder.write_timestamp(qp.clone(), f*2, PipelineStage::TopOfPipe).unwrap(); } }
+                    builder.bind_pipeline_compute(pipe.clone()).unwrap()
+                        .push_constants(pipe.layout().clone(), 0, push_constants).unwrap()
+                        .bind_descriptor_sets(PipelineBindPoint::Compute, pipe.layout().clone(), 0, vec![rcx.render_set.clone(), self.voxel_set.clone()]).unwrap();
+                    unsafe { builder.dispatch([render_extent[0].div_ceil(8), render_extent[1].div_ceil(8), 1]).unwrap(); }
+                    if let Some(qp) = &query_pool { unsafe { builder.write_timestamp(qp.clone(), f*2+1, PipelineStage::BottomOfPipe).unwrap(); } }
+                    let mut info = BlitImageInfo::images(
+                        rcx.render_image.clone(),
+                        rcx.image_views[image_index as usize].image().clone(),
+                    );
+                    info.filter = Filter::Nearest;
+                    builder.blit_image(info).unwrap();
+                    let command_buffer = builder.build().unwrap();
+                    let start = Instant::now();
+                    let future = acquire_future.then_execute(self.queue.clone(), command_buffer).unwrap()
+                        .then_swapchain_present(self.queue.clone(), SwapchainPresentInfo::swapchain_image_index(rcx.swapchain.clone(), image_index))
+                        .then_signal_fence_and_flush().unwrap();
+                    future.wait(None).unwrap();
+                    total_cpu += start.elapsed();
+                }
+                // Fetch GPU timestamps if available
+                let avg_gpu_ns_opt = if let Some(qp) = &query_pool { if supports_timestamps {
+                    let mut data: Vec<u64> = vec![0; (frames*2) as usize];
+                    qp.get_results(0..frames*2, &mut data, QueryResultFlags::WAIT).unwrap();
+                    for f in 0..frames { let start = data[(f*2) as usize]; let end = data[(f*2+1) as usize]; if end>start { let ticks = (end - start) as f64; total_gpu_ns_accum += ticks * timestamp_period as f64; } }
+                    if total_gpu_ns_accum > 0.0 { Some((total_gpu_ns_accum / frames as f64) as u128) } else { None }
+                } else { None } } else { None };
+                (total_cpu / frames, avg_gpu_ns_opt)
+            };
+            let (branching_cpu, branching_gpu) = run_variant(branching_pipe);
+            let (branchless_cpu, branchless_gpu) = run_variant(branchless_pipe);
+            println!("Benchmark Results ({} frames each):", frames);
+            println!("  Branching traversal avg frame CPU: {:?}", branching_cpu);
+            if let Some(ns)=branching_gpu { println!("  Branching traversal avg frame GPU: {:.3} ms", ns as f64 / 1_000_000.0); }
+            println!("  Branchless traversal avg frame CPU: {:?}", branchless_cpu);
+            if let Some(ns)=branchless_gpu { println!("  Branchless traversal avg frame GPU: {:.3} ms", ns as f64 / 1_000_000.0); }
+        }
+
+    // Re-borrow render context for the remainder of the standard render path.
+    let rcx = self.rcx.as_mut().unwrap();
+
+        let render_extent = rcx.render_image.extent();
+        let resample_extent = rcx.resample_image.extent();
+        self.camera.extent = [render_extent[0] as f64, render_extent[1] as f64];
+
+        let pixel_to_ray = self.camera.pixel_to_ray_matrix();
+
+        let size = self.voxel_resolution as f64;
+        let mut scale_and_center = Matrix4::from_diagonal(&Vector4::from_element(size));
+        scale_and_center.set_column(3, &Vector3::from_element(0.5 * size).push(1.0));
+        let pixel_to_ray = scale_and_center * pixel_to_ray;
+
+            #[derive(BufferContents)]
+            #[repr(C)]
+            struct PushConstants {
+                pixel_to_ray: Matrix4<f32>,
+                voxel_count: u32,
+                render_mode: u32,
+                _pad: [u32; 2],
+                resolutions: [u32; 3],
+            }
+            let effective_count = self.active_voxel_grids.min(Model::ALL.len() as u32).max(1).min(3);
+            let mut res_arr = [0u32; 3];
+            for (i, r) in self.grid_resolutions.iter().take(3).enumerate() { res_arr[i] = *r; }
+            if effective_count as usize > self.grid_resolutions.len() { // placeholder path
+                res_arr[0] = self.voxel_resolution;
+            }
+            let push_constants = PushConstants {
+                pixel_to_ray: pixel_to_ray.cast(),
+                voxel_count: effective_count,
+                render_mode: self.render_mode as u32,
+                _pad: [0, 0],
+                resolutions: res_arr,
+            };
+
+        let mut builder = AutoCommandBufferBuilder::primary(
+            self.command_buffer_allocator.clone(),
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        builder
+            .clear_color_image(ClearColorImageInfo::image(rcx.render_image.clone()))
+            .unwrap();
+
+        builder
+            .bind_pipeline_compute(self.render_pipeline.clone())
+            .unwrap()
+            .push_constants(self.render_pipeline.layout().clone(), 0, push_constants)
+            .unwrap()
+            .bind_descriptor_sets(
+                PipelineBindPoint::Compute,
+                self.render_pipeline.layout().clone(),
+                0,
+                vec![rcx.render_set.clone(), self.voxel_set.clone()],
+            )
+            .unwrap();
+        unsafe {
+            builder
+                .dispatch([
+                    render_extent[0].div_ceil(8),
+                    render_extent[1].div_ceil(8),
+                    1,
+                ])
+                .unwrap();
+        }
+
+        builder
+            .bind_pipeline_compute(self.resample_pipeline.clone())
+            .unwrap()
+            .bind_descriptor_sets(
+                PipelineBindPoint::Compute,
+                self.resample_pipeline.layout().clone(),
+                0,
+                vec![rcx.resample_set.clone()],
+            )
+            .unwrap();
+
+        unsafe {
+            builder
+                .dispatch([
+                    resample_extent[0].div_ceil(8),
+                    resample_extent[1].div_ceil(8),
+                    1,
+                ])
+                .unwrap();
+        }
+
+        let mut info = BlitImageInfo::images(
+            rcx.resample_image.clone(),
+            rcx.image_views[image_index as usize].image().clone(),
+        );
+        info.filter = Filter::Nearest;
+        builder.blit_image(info).unwrap();
+
+        let command_buffer = builder.build().unwrap();
+
+        let render_future = acquire_future
+            .then_execute(self.queue.clone(), command_buffer)
+            .unwrap();
+
+        let gui_future = rcx
+            .gui
+            .draw_on_image(render_future, rcx.image_views[image_index as usize].clone());
+
+        gui_future
+            .then_swapchain_present(
+                self.queue.clone(),
+                SwapchainPresentInfo::swapchain_image_index(rcx.swapchain.clone(), image_index),
+            )
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let window = Arc::new(
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_inner_size(INITIAL_WINDOW_RESOLUTION)
+                        .with_window_icon(Some(load_icon(include_bytes!("../assets/icon.png"))))
+                        .with_title("Voxel Ray Traversal"),
+                )
+                .unwrap(),
+        );
+        let surface = Surface::from_window(self.instance.clone(), window.clone()).unwrap();
+
+        let (swapchain, images) = get_swapchain_images(&self.device, &surface, &window);
+        let image_views = images
+            .iter()
+            .map(|i| ImageView::new(i.clone(), ImageViewCreateInfo::from_image(i)).unwrap())
+            .collect::<Vec<_>>();
+
+        let window_extent: [u32; 2] = window.inner_size().into();
+        let render_extent = [
+            (window_extent[0] as f32 * self.render_scale) as u32,
+            (window_extent[1] as f32 * self.render_scale) as u32,
+        ];
+        let (render_image, render_set, resample_image, resample_set) = get_images_and_sets(
+            self.memory_allocator.clone(),
+            self.descriptor_set_allocator.clone(),
+            &self.render_pipeline,
+            &self.resample_pipeline,
+            render_extent,
+            window_extent,
+        );
+
+        let gui = Gui::new(
+            event_loop,
+            surface,
+            self.queue.clone(),
+            swapchain.image_format(),
+            GuiConfig {
+                is_overlay: true,
+                ..Default::default()
+            },
+        );
+
+        let recreate_swapchain = false;
+
+        self.rcx = Some(RenderContext {
+            window,
+            swapchain,
+            image_views,
+
+            render_image,
+            render_set,
+            resample_image,
+            resample_set,
+
+            gui,
+
+            recreate_swapchain,
+        });
+    }
+
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
+        self.input.step();
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        if !self.rcx.as_mut().unwrap().gui.update(&event) {
+            self.input.process_window_event(&event);
+        }
+
+        if event == WindowEvent::RedrawRequested {
+            self.render(event_loop);
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        self.input.process_device_event(&event);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.input.end_step();
+        self.update(event_loop);
+        let rcx = self.rcx.as_mut().unwrap();
+        rcx.window.request_redraw();
+    }
+}
