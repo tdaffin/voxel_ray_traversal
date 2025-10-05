@@ -101,7 +101,7 @@ pub struct App {
 
 
 impl App {
-    pub fn new(event_loop: &EventLoop<()>) -> Self {
+        pub fn new(event_loop: &EventLoop<()>) -> Self {
         let library = VulkanLibrary::new().unwrap();
 
         let mut required_extensions = Surface::required_extensions(event_loop).unwrap();
@@ -115,10 +115,10 @@ impl App {
                 enabled_extensions: required_extensions,
                 ..Default::default()
             },
-    )
-    .unwrap();
+        )
+        .unwrap();
 
-    let mut device_extensions = DeviceExtensions {
+        let mut device_extensions = DeviceExtensions {
             khr_swapchain: true,
             ..DeviceExtensions::empty()
         };
@@ -195,9 +195,9 @@ impl App {
         let resample_pipeline =
             HotReloadComputePipeline::new(device.clone(), &shaders_dir.join("resample.comp"));
 
-    let voxel_resolution = INITIAL_VOXEL_RESOLUTION;
-    let grid_resolutions = vec![voxel_resolution; Model::ALL.len()];
-    let future_grid_resolutions = grid_resolutions.clone();
+        let voxel_resolution = INITIAL_VOXEL_RESOLUTION;
+        let grid_resolutions = vec![voxel_resolution; Model::ALL.len()];
+        let future_grid_resolutions = grid_resolutions.clone();
         let model = Model::Bunny;
         // Start with a single placeholder so we can build a descriptor set immediately.
         let placeholder_view = create_empty_voxel_placeholder(
@@ -213,7 +213,7 @@ impl App {
         );
         // Channel for background voxelization results (model_index, voxel data)
         let (tx, rx) = mpsc::channel();
-    let voxel_generation = 1u64;
+        let voxel_generation = 1u64;
         for (idx, model) in Model::ALL.iter().enumerate() {
             let tx = tx.clone();
             let path = model.path().as_ref().to_path_buf();
@@ -225,10 +225,10 @@ impl App {
             });
         }
         drop(tx); // close extra sender
-    let voxel_views: Vec<Option<Arc<ImageView>>> = vec![None; Model::ALL.len()];
-    let voxel_pending = vec![true; Model::ALL.len()];
-    let voxel_progress = vec![(0,0); Model::ALL.len()];
-    let voxel_cancel_flag = Arc::new(AtomicBool::new(false));
+        let voxel_views: Vec<Option<Arc<ImageView>>> = vec![None; Model::ALL.len()];
+        let voxel_pending = vec![true; Model::ALL.len()];
+        let voxel_progress = vec![(0,0); Model::ALL.len()];
+        let voxel_cancel_flag = Arc::new(AtomicBool::new(false));
         let active_voxel_grids = Model::ALL.len() as u32;
 
         let input = WinitInputHelper::new();
