@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug voxel_ray_traversal",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/voxel_ray_traversal",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "cargo build",
+      "sourceLanguages": ["rust"],
+      "env": {
+        "RUST_BACKTRACE": "1",
+        "VK_INSTANCE_LAYERS": "VK_LAYER_KHRONOS_validation"
+      }
+    },
+    {
+      "name": "Run (Release) voxel_ray_traversal",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/release/voxel_ray_traversal",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "cargo build --release",
+      "sourceLanguages": ["rust"],
+      "env": {
+        "RUST_BACKTRACE": "1",
+        "VK_INSTANCE_LAYERS": "VK_LAYER_KHRONOS_validation"
+      }
+    }
+  ]
+}
