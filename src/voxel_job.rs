@@ -24,6 +24,7 @@ use crate::{
 #[derive(Debug)]
 pub enum VoxelJobMessage {
     Finished { generation: u64, index: usize, data: Vec<u128>, colors: Vec<u8> },
+    PaletteSlice { generation: u64, index: usize, base: u8, colors: Vec<[f32; 4]> },
     Progress { generation: u64, index: usize, done: usize, total: usize },
     Cancelled { generation: u64 },
 }
@@ -104,21 +105,42 @@ impl VoxelManager {
             let base_palette_index = (idx as u32 * (256 / Model::ALL.len() as u32)) as u8;
             // Each model gets a contiguous 16-color sub-range (low nibble variation added during voxel write).
             thread::spawn(move || {
-                let (vox, colors) = if path.extension().and_then(|e| e.to_str()) == Some("vox") {
-                    if let Some((v, c)) = crate::voxelize_vox::vox_to_voxels(&path, res) {
-                        (v, c)
+                let palette_span = (256 / Model::ALL.len() as u32) as u8; // subrange reserved per model
+                let (vox, colors, palette_opt) =
+                    if path.extension().and_then(|e| e.to_str()) == Some("vox") {
+                        if let Some((v, c, p)) = crate::voxelize_vox::vox_to_voxels(
+                            &path,
+                            res,
+                            base_palette_index,
+                            palette_span,
+                        ) {
+                            (v, c, Some(p))
+                        } else {
+                            (
+                                vec![0u128; (res as usize).pow(3) / 128],
+                                vec![0u8; (res as usize).pow(3)],
+                                None,
+                            )
+                        }
                     } else {
-                        (vec![0u128; (res as usize).pow(3) / 128], vec![0u8; (res as usize).pow(3)])
-                    }
-                } else {
-                    voxelize::ply_to_voxels(&path, res, base_palette_index)
-                };
+                        let (v, c) = voxelize::ply_to_voxels(&path, res, base_palette_index);
+                        (v, c, None)
+                    };
                 let _ = txc.send(VoxelJobMessage::Finished {
                     generation: generation_id,
                     index: idx,
                     data: vox,
                     colors,
                 });
+                // transmit palette slice for .vox models so we can blend custom palette
+                if let Some(pslice) = palette_opt {
+                    let _ = txc.send(VoxelJobMessage::PaletteSlice {
+                        generation: generation_id,
+                        index: idx,
+                        base: base_palette_index,
+                        colors: pslice,
+                    });
+                }
             });
         }
         drop(tx);
@@ -186,6 +208,25 @@ impl VoxelManager {
                         );
                         self.color_index_views[index] = Some(cview);
                         self.voxel_pending[index] = false;
+                        // NOTE: For .vox models, palette slice isn't yet copied into palette buffer.
+                        // palette slice (if any) applied separately via PaletteSlice message
+                    }
+                }
+                VoxelJobMessage::PaletteSlice { generation, index: _, base, colors } => {
+                    if generation != self.voxel_generation || self.cancel_requested {
+                        continue;
+                    }
+                    if !colors.is_empty() {
+                        if let Ok(mut data) = self.palette_buffer.write() {
+                            let mut dst = base as usize;
+                            for c in colors.iter() {
+                                if dst >= 256 {
+                                    break;
+                                }
+                                data[dst] = *c;
+                                dst += 1;
+                            }
+                        }
                     }
                 }
                 VoxelJobMessage::Cancelled { generation } => {
@@ -197,20 +238,13 @@ impl VoxelManager {
                     }
                 }
             }
-            // rebuild contiguous descriptor set
+            // Rebuild descriptor set including ANY ready grids (relax contiguous requirement).
             let mut ready: Vec<Arc<ImageView>> = Vec::new();
             let mut ready_colors: Vec<Arc<ImageView>> = Vec::new();
             for i in 0..self.voxel_views.len() {
-                if let Some(ref v) = self.voxel_views[i] {
-                    // Only include color view if both present
-                    if let Some(ref cv) = self.color_index_views[i] {
-                        ready.push(v.clone());
-                        ready_colors.push(cv.clone());
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
+                if let (Some(v), Some(cv)) = (&self.voxel_views[i], &self.color_index_views[i]) {
+                    ready.push(v.clone());
+                    ready_colors.push(cv.clone());
                 }
             }
             self.active_voxel_grids = ready.len() as u32;
@@ -310,10 +344,14 @@ impl VoxelManager {
                     })),
                 };
                 if path.extension().and_then(|e| e.to_str()) == Some("vox") {
-                    // No progress callbacks for .vox yet
-                    if let Some((vox, colors)) =
-                        crate::voxelize_vox::vox_to_voxels(&path, res_for_grid)
-                    {
+                    // No progress callbacks for .vox yet (fast load typically); still send palette slice.
+                    let palette_span = (256 / Model::ALL.len() as u32) as u8;
+                    if let Some((vox, colors, palette_slice)) = crate::voxelize_vox::vox_to_voxels(
+                        &path,
+                        res_for_grid,
+                        base_palette_index,
+                        palette_span,
+                    ) {
                         if !cancelled.load(Ordering::Relaxed) {
                             let _ = txc.send(VoxelJobMessage::Finished {
                                 generation: gen_thread,
@@ -321,6 +359,14 @@ impl VoxelManager {
                                 data: vox,
                                 colors,
                             });
+                            if !palette_slice.is_empty() {
+                                let _ = txc.send(VoxelJobMessage::PaletteSlice {
+                                    generation: gen_thread,
+                                    index: idx,
+                                    base: base_palette_index,
+                                    colors: palette_slice,
+                                });
+                            }
                         }
                     } else {
                         let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });

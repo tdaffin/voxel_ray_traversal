@@ -3,9 +3,12 @@ use std::path::Path;
 
 /// Convert a MagicaVoxel .vox file into packed voxel bitfield and palette indices.
 /// Returns (occupancy_bitfield_vec_u128, color_indices_per_voxel)
+/// base_palette_index: starting index in global palette where this model's colors will be placed.
+/// palette_span: maximum number of palette slots reserved for this model.
+/// Returns (voxels, remapped_color_indices, palette_colors_used)
 pub fn vox_to_voxels(
-    path: impl AsRef<Path>, target_resolution: u32,
-) -> Option<(Vec<u128>, Vec<u8>)> {
+    path: impl AsRef<Path>, target_resolution: u32, base_palette_index: u8, palette_span: u8,
+) -> Option<(Vec<u128>, Vec<u8>, Vec<[f32; 4]>)> {
     #[allow(dead_code)]
     const _VOX_LOADER_VERSION: &str = "vox_loader_v1";
     let path_ref = path.as_ref();
@@ -29,6 +32,15 @@ pub fn vox_to_voxels(
 
     let scale = (res as f32 - 1.0) / ((sx.max(sy)).max(sz)) as f32;
 
+    // Build a remap table from MagicaVoxel color index -> local subrange offset
+    // MagicaVoxel palette indices are 1..=255; 0 unused.
+    let mut remap: [u8; 256] = [0; 256];
+    let mut used_colors: Vec<[f32; 4]> = Vec::new();
+    // Prepare palette slice (truncate to palette_span)
+    // scene.palette holds 256 RGBA (u8) entries (MagicaVoxel), default if missing.
+    let palette_rgba = &scene.palette;
+    // We'll lazily assign as voxels encountered to keep only used subset (up to span)
+
     for v in &model.voxels {
         let x = (v.x as f32 * scale).round() as i32;
         let y = (v.y as f32 * scale).round() as i32;
@@ -40,9 +52,30 @@ pub fn vox_to_voxels(
         let texel = (x + ((y + (z / 8) * res) / 4) * res) / 4;
         let bit = (x % 4) * 32 + (y % 4) + (z % 8) * 4;
         voxels[texel] |= 1u128 << bit;
-        colors[(z * res + y) * res + x] = v.i;
+        let orig = v.i as usize; // 0..255
+        let mapped = if remap[orig] != 0 || orig == 0 {
+            remap[orig]
+        } else {
+            // Need to allocate new slot in local subrange
+            if used_colors.len() < palette_span as usize {
+                let pal = palette_rgba[orig];
+                let rgba = [
+                    pal.r as f32 / 255.0,
+                    pal.g as f32 / 255.0,
+                    pal.b as f32 / 255.0,
+                    pal.a as f32 / 255.0,
+                ];
+                used_colors.push(rgba);
+                let local_offset = used_colors.len() as u8 - 1;
+                let global_index = base_palette_index.saturating_add(local_offset);
+                remap[orig] = global_index.max(1); // keep 0 reserved if orig==0
+                remap[orig]
+            } else {
+                // Subrange full: reuse first slot (could be improved with nearest-color mapping)
+                base_palette_index
+            }
+        };
+        colors[(z * res + y) * res + x] = mapped;
     }
-
-    // TODO: Integrate scene.palette into palette buffer or remap indices.
-    Some((voxels, colors))
+    Some((voxels, colors, used_colors))
 }
