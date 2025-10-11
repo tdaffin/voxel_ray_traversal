@@ -10,7 +10,6 @@ mod frame_timer;
 mod gpu;
 mod hot_reload;
 mod input_controller;
-mod model;
 mod model_discovery;
 mod pipelines;
 mod push_constants;

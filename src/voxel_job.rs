@@ -27,7 +27,7 @@ use crate::{
 #[derive(Debug)]
 pub enum VoxelJobMessage {
     Finished { generation: u64, index: usize, data: Vec<u128>, colors: Vec<u8> },
-    PaletteSlice { generation: u64, index: usize, base: u8, colors: Vec<[f32; 4]> },
+    PaletteSlice { generation: u64, base: u8, colors: Vec<[f32; 4]> },
     Progress { generation: u64, index: usize, done: usize, total: usize },
     Cancelled { generation: u64 },
 }
@@ -118,14 +118,28 @@ impl VoxelManager {
                 let palette_span = (256 / model_count as u32) as u8; // subrange reserved per model
                 let (vox, colors, palette_opt) =
                     if path.extension().and_then(|e| e.to_str()) == Some("vox") {
-                        if let Some((v, c, p)) = crate::voxelize_vox::vox_to_voxels(
+                        if !path.exists() {
+                            eprintln!("[voxel] .vox file missing: {}", path.display());
+                            (
+                                vec![0u128; (res as usize).pow(3) / 128],
+                                vec![0u8; (res as usize).pow(3)],
+                                None,
+                            )
+                        } else if let Some((v, c, p)) = crate::voxelize_vox::vox_to_voxels(
                             &path,
                             res,
                             base_palette_index,
                             palette_span,
                         ) {
+                            if v.iter().all(|&u| u == 0) {
+                                eprintln!(
+                                    "[voxel] WARNING: .vox produced empty voxel set: {}",
+                                    path.display()
+                                );
+                            }
                             (v, c, Some(p))
                         } else {
+                            eprintln!("[voxel] Failed to parse .vox file: {}", path.display());
                             (
                                 vec![0u128; (res as usize).pow(3) / 128],
                                 vec![0u8; (res as usize).pow(3)],
@@ -146,7 +160,6 @@ impl VoxelManager {
                 if let Some(pslice) = palette_opt {
                     let _ = txc.send(VoxelJobMessage::PaletteSlice {
                         generation: generation_id,
-                        index: idx,
                         base: base_palette_index,
                         colors: pslice,
                     });
@@ -223,7 +236,7 @@ impl VoxelManager {
                         // palette slice (if any) applied separately via PaletteSlice message
                     }
                 }
-                VoxelJobMessage::PaletteSlice { generation, index: _, base, colors } => {
+                VoxelJobMessage::PaletteSlice { generation, base, colors } => {
                     if generation != self.voxel_generation || self.cancel_requested {
                         continue;
                     }
@@ -263,7 +276,7 @@ impl VoxelManager {
                 // Build grid info array with precomputed origins (spacing 25% of each grid size)
                 let mut infos: Vec<GridInfo> = Vec::new();
                 let mut cursor = 0.0f32;
-                for (i, view) in ready.iter().enumerate() {
+                for (i, _view) in ready.iter().enumerate() {
                     let res =
                         self.grid_resolutions.get(i).copied().unwrap_or(self.voxel_resolution);
                     infos.push(GridInfo {
@@ -381,12 +394,23 @@ impl VoxelManager {
                 if path.extension().and_then(|e| e.to_str()) == Some("vox") {
                     // No progress callbacks for .vox yet (fast load typically); still send palette slice.
                     let palette_span = (256 / model_count as u32) as u8;
-                    if let Some((vox, colors, palette_slice)) = crate::voxelize_vox::vox_to_voxels(
-                        &path,
-                        res_for_grid,
-                        base_palette_index,
-                        palette_span,
-                    ) {
+                    if !path.exists() {
+                        eprintln!("[voxel] .vox file missing: {}", path.display());
+                        let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
+                    } else if let Some((vox, colors, palette_slice)) =
+                        crate::voxelize_vox::vox_to_voxels(
+                            &path,
+                            res_for_grid,
+                            base_palette_index,
+                            palette_span,
+                        )
+                    {
+                        if vox.iter().all(|&u| u == 0) {
+                            eprintln!(
+                                "[voxel] WARNING: .vox produced empty voxel set: {}",
+                                path.display()
+                            );
+                        }
                         if !cancelled.load(Ordering::Relaxed) {
                             let _ = txc.send(VoxelJobMessage::Finished {
                                 generation: gen_thread,
@@ -397,13 +421,13 @@ impl VoxelManager {
                             if !palette_slice.is_empty() {
                                 let _ = txc.send(VoxelJobMessage::PaletteSlice {
                                     generation: gen_thread,
-                                    index: idx,
                                     base: base_palette_index,
                                     colors: palette_slice,
                                 });
                             }
                         }
                     } else {
+                        eprintln!("[voxel] Failed to parse .vox file: {}", path.display());
                         let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
                     }
                 } else {
