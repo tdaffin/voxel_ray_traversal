@@ -6,9 +6,18 @@ use std::path::Path;
 /// base_palette_index: starting index in global palette where this model's colors will be placed.
 /// palette_span: maximum number of palette slots reserved for this model.
 /// Returns (voxels, remapped_color_indices, palette_colors_used)
+pub struct VoxLoadResult {
+    pub voxels: Vec<u128>,
+    pub colors: Vec<u8>,
+    pub palette: Vec<[f32; 4]>,
+    pub native_resolution: u32, // original largest source dimension
+    pub used_resolution: u32, // actual voxelization resolution used (may differ if target provided)
+}
+
 pub fn vox_to_voxels(
-    path: impl AsRef<Path>, target_resolution: u32, base_palette_index: u8, palette_span: u8,
-) -> Option<(Vec<u128>, Vec<u8>, Vec<[f32; 4]>)> {
+    path: impl AsRef<Path>, target_resolution: Option<u32>, base_palette_index: u8,
+    palette_span: u8,
+) -> Option<VoxLoadResult> {
     #[allow(dead_code)]
     const _VOX_LOADER_VERSION: &str = "vox_loader_v1";
     let path_ref = path.as_ref();
@@ -23,7 +32,9 @@ pub fn vox_to_voxels(
         return None;
     }
 
-    let res = target_resolution as usize;
+    let native_max = (sx.max(sy)).max(sz) as u32; // original largest dimension
+    let chosen = target_resolution.unwrap_or(native_max);
+    let res = chosen as usize;
     if res == 0 {
         return None;
     }
@@ -77,5 +88,11 @@ pub fn vox_to_voxels(
         };
         colors[(z * res + y) * res + x] = mapped;
     }
-    Some((voxels, colors, used_colors))
+    Some(VoxLoadResult {
+        voxels,
+        colors,
+        palette: used_colors,
+        native_resolution: native_max,
+        used_resolution: chosen,
+    })
 }
