@@ -38,8 +38,6 @@ pub enum VoxelJobMessage {
         storage_w: u32,
         storage_h: u32,
         storage_d: u32,
-        palette_base: u32,
-        palette_len: u32,
     },
     PaletteSlice {
         generation: u64,
@@ -146,7 +144,7 @@ impl VoxelManager {
             storage_h: initial_resolution / 4,
             storage_d: initial_resolution / 8,
             palette_base: 0,
-            palette_len: 256,
+            palette_len: 0,
         }];
         let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
         let voxel_set = build_voxel_descriptor_set(
@@ -207,7 +205,7 @@ impl VoxelManager {
                         }
                     } else {
                         // PLY path now uses local 0-based palette indices; pass 0 (ignored in implementation)
-                        let (v, c, logical, storage) = voxelize::ply_to_voxels(&path, res, 0);
+                        let (v, c, logical, storage) = voxelize::ply_to_voxels(&path, res);
                         (v, c, None, Some(logical), Some(storage))
                     };
                 let used_res = res; // keep legacy resolution for now (could be dim max)
@@ -226,8 +224,6 @@ impl VoxelManager {
                     storage_w: sw,
                     storage_h: sh,
                     storage_d: sd,
-                    palette_base: 0,
-                    palette_len: 256,
                 });
                 // transmit palette slice for .vox models so we can blend custom palette
                 if let Some(pslice) = palette_opt {
@@ -310,8 +306,6 @@ impl VoxelManager {
                     storage_w,
                     storage_h,
                     storage_d,
-                    palette_base: _,
-                    palette_len: _,
                 } => {
                     if generation != self.voxel_generation || self.cancel_requested {
                         continue;
@@ -561,7 +555,7 @@ impl VoxelManager {
             storage_h: self.voxel_resolution / 4,
             storage_d: self.voxel_resolution / 8,
             palette_base: 0,
-            palette_len: 256,
+            palette_len: 0,
         }];
         let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
         self.voxel_set = build_voxel_descriptor_set(
@@ -632,8 +626,6 @@ impl VoxelManager {
                                 storage_w: result.storage_w,
                                 storage_h: result.storage_h,
                                 storage_d: result.storage_d,
-                                palette_base: 0,
-                                palette_len: palette_slice.len() as u32,
                             });
                             if !palette_slice.is_empty() {
                                 let _ = txc.send(VoxelJobMessage::PaletteSlice {
@@ -648,12 +640,9 @@ impl VoxelManager {
                         let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
                     }
                 } else {
-                    if let Some((vox, colors, _logical, _storage)) = ply_to_voxels_with_progress(
-                        &path,
-                        res_for_grid,
-                        0, // local indices only
-                        prog_cb,
-                    ) {
+                    if let Some((vox, colors, _logical, _storage)) =
+                        ply_to_voxels_with_progress(&path, res_for_grid, prog_cb)
+                    {
                         if !cancelled.load(Ordering::Relaxed) {
                             let _ = txc.send(VoxelJobMessage::Finished {
                                 generation: gen_thread,
@@ -667,8 +656,6 @@ impl VoxelManager {
                                 storage_w: res_for_grid / 4,
                                 storage_h: res_for_grid / 4,
                                 storage_d: res_for_grid / 8,
-                                palette_base: 0,
-                                palette_len: 16, // PLY procedural palette currently 16-shade gradient
                             });
                             // Emit procedural palette slice (grayscale ramp)
                             let mut slice = Vec::new();

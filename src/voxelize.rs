@@ -20,7 +20,7 @@ pub struct VoxelProgressCallbacks<'a> {
 }
 
 pub fn ply_to_voxels_with_progress(
-    path: impl AsRef<Path>, resolution: u32, base_palette_index: u8, cb: VoxelProgressCallbacks,
+    path: impl AsRef<Path>, resolution: u32, cb: VoxelProgressCallbacks,
 ) -> Option<(Vec<u128>, Vec<u8>, (u32, u32, u32), (u32, u32, u32))> {
     let mut mesh = parse_ply(path);
     if cb.cancelled.load(Ordering::Relaxed) {
@@ -31,7 +31,7 @@ pub fn ply_to_voxels_with_progress(
         return None;
     }
     let (voxels, color_indices, logical_dims, storage_dims) =
-        voxelize_mesh_progress(&mesh, resolution, base_palette_index, &cb);
+        voxelize_mesh_progress(&mesh, resolution, &cb);
     if cb.cancelled.load(Ordering::Relaxed) {
         return None;
     }
@@ -39,12 +39,11 @@ pub fn ply_to_voxels_with_progress(
 }
 
 pub fn ply_to_voxels(
-    path: impl AsRef<Path>, resolution: u32, base_palette_index: u8,
+    path: impl AsRef<Path>, resolution: u32,
 ) -> (Vec<u128>, Vec<u8>, (u32, u32, u32), (u32, u32, u32)) {
     ply_to_voxels_with_progress(
         path,
         resolution,
-        base_palette_index,
         VoxelProgressCallbacks { cancelled: &AtomicBool::new(false), progress: None },
     )
     .unwrap_or_default()
@@ -147,7 +146,7 @@ fn transform_vertices(vertices: &mut [Vec3], resolution: u32) {
 // Each texel is 4x4x8 voxels, and each channel is 1x4x8 voxels.
 
 fn voxelize_mesh_progress(
-    mesh: &Mesh, resolution: u32, base_palette_index: u8, cb: &VoxelProgressCallbacks,
+    mesh: &Mesh, resolution: u32, cb: &VoxelProgressCallbacks,
 ) -> (Vec<u128>, Vec<u8>, (u32, u32, u32), (u32, u32, u32)) {
     // For non-cubic storage we preserve logical dims (resolution^3 target still uniform for ply)
     // but future per-axis scaling could set these independently. Keep interface flexible.
