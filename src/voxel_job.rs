@@ -62,6 +62,7 @@ pub struct VoxelManager {
     pub voxel_resolution: u32,
     pub grid_resolutions: Vec<u32>,
     pub grid_dims: Vec<(u32, u32, u32)>,
+    pub grid_storage: Vec<(u32, u32, u32)>, // (storage_w, storage_h, storage_d)
     pub future_grid_resolutions: Vec<u32>,
     pub active_voxel_grids: u32,
 
@@ -91,6 +92,11 @@ impl VoxelManager {
         let grid_resolutions = vec![initial_resolution; model_count];
         let grid_dims =
             vec![(initial_resolution, initial_resolution, initial_resolution); model_count];
+        let grid_storage =
+            vec![
+                (initial_resolution / 4, initial_resolution / 4, initial_resolution / 8);
+                model_count
+            ];
         let future_grid_resolutions = grid_resolutions.clone();
         let placeholder_view = create_empty_voxel_placeholder(
             memory_allocator.clone(),
@@ -102,6 +108,8 @@ impl VoxelManager {
             memory_allocator.clone(),
             command_buffer_allocator.clone(),
             queue.clone(),
+            initial_resolution,
+            initial_resolution,
             initial_resolution,
         );
         // Build default palette (simple distinct hues)
@@ -152,14 +160,13 @@ impl VoxelManager {
             // Each model gets a contiguous 16-color sub-range (low nibble variation added during voxel write).
             thread::spawn(move || {
                 let palette_span = (256 / model_count as u32) as u8; // subrange reserved per model
-                let (vox, colors, palette_opt, native_res_opt, dims_opt, storage_opt) =
+                let (vox, colors, palette_opt, dims_opt, storage_opt) =
                     if path.extension().and_then(|e| e.to_str()) == Some("vox") {
                         if !path.exists() {
                             eprintln!("[voxel] .vox file missing: {}", path.display());
                             (
                                 vec![0u128; (res as usize).pow(3) / 128],
                                 vec![0u8; (res as usize).pow(3)],
-                                None,
                                 None,
                                 None,
                                 None,
@@ -173,17 +180,17 @@ impl VoxelManager {
                             let v = result.voxels;
                             let c = result.colors;
                             let p = result.palette;
-                            let used_res = result.used_resolution;
                             let dims_tuple = (result.dim_x, result.dim_y, result.dim_z);
                             // Currently .vox path still uses cubic packed storage; derive for now
-                            let storage_tuple = (used_res / 4, used_res / 4, used_res / 8);
+                            let storage_tuple =
+                                (result.storage_w, result.storage_h, result.storage_d);
                             if v.iter().all(|&u| u == 0) {
                                 eprintln!(
                                     "[voxel] WARNING: .vox produced empty voxel set: {}",
                                     path.display()
                                 );
                             }
-                            (v, c, Some(p), Some(used_res), Some(dims_tuple), Some(storage_tuple))
+                            (v, c, Some(p), Some(dims_tuple), Some(storage_tuple))
                         } else {
                             eprintln!("[voxel] Failed to parse .vox file: {}", path.display());
                             (
@@ -192,15 +199,14 @@ impl VoxelManager {
                                 None,
                                 None,
                                 None,
-                                None,
                             )
                         }
                     } else {
                         let (v, c, logical, storage) =
                             voxelize::ply_to_voxels(&path, res, base_palette_index);
-                        (v, c, None, Some(res), Some(logical), Some(storage))
+                        (v, c, None, Some(logical), Some(storage))
                     };
-                let used_res = native_res_opt.unwrap_or(res);
+                let used_res = res; // keep legacy resolution for now (could be dim max)
                 let (dx, dy, dz) = dims_opt.unwrap_or((used_res, used_res, used_res));
                 let (sw, sh, sd) =
                     storage_opt.unwrap_or((used_res / 4, used_res / 4, used_res / 8));
@@ -240,6 +246,7 @@ impl VoxelManager {
             voxel_resolution: initial_resolution,
             grid_resolutions,
             grid_dims,
+            grid_storage,
             future_grid_resolutions,
             active_voxel_grids,
             voxel_views,
@@ -304,7 +311,9 @@ impl VoxelManager {
                             command_buffer_allocator.clone(),
                             queue.clone(),
                             colors,
-                            resolution,
+                            dim_x,
+                            dim_y,
+                            dim_z,
                         );
                         self.color_index_views[index] = Some(cview);
                         self.voxel_pending[index] = false;
@@ -313,6 +322,9 @@ impl VoxelManager {
                         }
                         if index < self.grid_dims.len() {
                             self.grid_dims[index] = (dim_x, dim_y, dim_z);
+                        }
+                        if index < self.grid_storage.len() {
+                            self.grid_storage[index] = (storage_w, storage_h, storage_d);
                         }
                         // NOTE: For .vox models, palette slice isn't yet copied into palette buffer.
                         // palette slice (if any) applied separately via PaletteSlice message
@@ -376,7 +388,7 @@ impl VoxelManager {
                 let target_row_width = (total_area.sqrt() as f32).max(1.0);
                 let mut infos: Vec<GridInfo> = vec![GridInfo::default(); dims_ready.len()];
                 let mut row_y = 0.0f32;
-                let mut cursor = 0.0f32;
+                let mut cursor = 0.0f32; // projected row width accumulator
                 let mut current_row: Vec<(usize, u32, u32, u32, u32)> = Vec::new();
                 let place_row = |row: &Vec<(usize, u32, u32, u32, u32)>,
                                  base_y: f32,
@@ -384,9 +396,11 @@ impl VoxelManager {
                     let mut x = 0.0f32;
                     let mut max_h = 0.0f32;
                     for &(orig_index, res, dx, dy, dz) in row.iter() {
-                        let storage_w = res / 4; // existing cubic assumption
-                        let storage_h = res / 4;
-                        let storage_d = res / 8;
+                        let (storage_w, storage_h, storage_d) = self
+                            .grid_storage
+                            .get(orig_index)
+                            .copied()
+                            .unwrap_or((res / 4, res / 4, res / 8));
                         infos[orig_index] = GridInfo {
                             resolution: res,
                             origin_x: x,
@@ -573,9 +587,9 @@ impl VoxelManager {
                                 dim_x: result.dim_x,
                                 dim_y: result.dim_y,
                                 dim_z: result.dim_z,
-                                storage_w: result.used_resolution / 4,
-                                storage_h: result.used_resolution / 4,
-                                storage_d: result.used_resolution / 8,
+                                storage_w: result.storage_w,
+                                storage_h: result.storage_h,
+                                storage_d: result.storage_d,
                             });
                             if !palette_slice.is_empty() {
                                 let _ = txc.send(VoxelJobMessage::PaletteSlice {

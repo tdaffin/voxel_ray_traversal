@@ -10,11 +10,13 @@ pub struct VoxLoadResult {
     pub voxels: Vec<u128>,
     pub colors: Vec<u8>,
     pub palette: Vec<[f32; 4]>,
-    pub native_resolution: u32, // original largest source dimension (pre padding)
-    pub used_resolution: u32,   // storage resolution used (padded to multiples for packing)
-    pub dim_x: u32,             // original X dimension (no isotropic scaling applied)
-    pub dim_y: u32,             // original Y dimension
-    pub dim_z: u32,             // original Z dimension
+    pub used_resolution: u32, // legacy cubic resolution (kept for compatibility)
+    pub dim_x: u32,           // logical X dimension
+    pub dim_y: u32,           // logical Y dimension
+    pub dim_z: u32,           // logical Z dimension
+    pub storage_w: u32,       // packed texel width (ceil(dim_x/4))
+    pub storage_h: u32,       // packed texel height (ceil(dim_y/4))
+    pub storage_d: u32,       // packed texel depth (ceil(dim_z/8))
 }
 
 pub fn vox_to_voxels(
@@ -35,19 +37,21 @@ pub fn vox_to_voxels(
         return None;
     }
 
-    let native_max = (sx.max(sy)).max(sz) as u32; // original largest dimension
-    let requested = target_resolution.unwrap_or(native_max);
-    // Storage resolution (cubic) – round up to multiple of 8 for packing (z/8) & 4 for x,y/4.
-    let mut chosen = requested.max(native_max);
-    if chosen == 0 {
-        return None;
+    let native_max = (sx.max(sy)).max(sz) as u32;
+    let requested = target_resolution.unwrap_or(native_max).max(native_max);
+    // For now keep used_resolution for backwards compatibility (still padded cubic) but allocate non-cubic storage below.
+    let mut cubic = requested;
+    if cubic % 8 != 0 {
+        cubic += 8 - (cubic % 8);
     }
-    if chosen % 8 != 0 {
-        chosen += 8 - (chosen % 8);
-    }
-    let res = chosen as usize;
-    let mut voxels = vec![0u128; res * res * res / 128];
-    let mut colors = vec![0u8; res * res * res];
+    let used_resolution = cubic; // legacy value
+    // Non-cubic packed storage extents (texel units are 4x4x8 voxels)
+    let storage_w = ((sx as u32) + 3) / 4;
+    let storage_h = ((sy as u32) + 3) / 4;
+    let storage_d = ((sz as u32) + 7) / 8;
+    let packed_texel_count = (storage_w * storage_h * storage_d) as usize;
+    let mut voxels = vec![0u128; packed_texel_count];
+    let mut colors = vec![0u8; sx * sy * sz];
 
     // Build a remap table from MagicaVoxel color index -> local subrange offset
     // MagicaVoxel palette indices are 1..=255; 0 unused.
@@ -63,10 +67,11 @@ pub fn vox_to_voxels(
         let x = v.x as usize;
         let y = v.y as usize;
         let z = v.z as usize;
-        if x >= res || y >= res || z >= res {
-            continue;
-        }
-        let texel = (x + ((y + (z / 8) * res) / 4) * res) / 4;
+        // Bounds already guaranteed within logical dims
+        let tx = x / 4;
+        let ty = y / 4;
+        let tz = z / 8;
+        let texel = (tx + (ty + tz * storage_h as usize) * storage_w as usize) as usize;
         let bit = (x % 4) * 32 + (y % 4) + (z % 8) * 4;
         voxels[texel] |= 1u128 << bit;
         let orig = v.i as usize; // 0..255
@@ -92,16 +97,18 @@ pub fn vox_to_voxels(
                 base_palette_index
             }
         };
-        colors[(z * res + y) * res + x] = mapped;
+        colors[(z * sy + y) * sx + x] = mapped;
     }
     Some(VoxLoadResult {
         voxels,
         colors,
         palette: used_colors,
-        native_resolution: native_max,
-        used_resolution: chosen,
+        used_resolution: used_resolution,
         dim_x: sx as u32,
         dim_y: sy as u32,
         dim_z: sz as u32,
+        storage_w,
+        storage_h,
+        storage_d,
     })
 }

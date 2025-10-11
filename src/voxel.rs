@@ -136,14 +136,14 @@ pub fn create_color_index_image_view(
     command_buffer_allocator: Arc<
         vulkano::command_buffer::allocator::StandardCommandBufferAllocator,
     >,
-    queue: Arc<Queue>, indices: Vec<u8>, resolution: u32,
+    queue: Arc<Queue>, indices: Vec<u8>, dim_x: u32, dim_y: u32, dim_z: u32,
 ) -> Arc<ImageView> {
     let image = Image::new(
         memory_allocator.clone(),
         ImageCreateInfo {
             image_type: ImageType::Dim3d,
             format: vulkano::format::Format::R8_UINT,
-            extent: [resolution, resolution, resolution],
+            extent: [dim_x, dim_y, dim_z],
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_DST,
             ..Default::default()
         },
@@ -229,16 +229,18 @@ pub fn create_empty_color_index_placeholder(
     command_buffer_allocator: Arc<
         vulkano::command_buffer::allocator::StandardCommandBufferAllocator,
     >,
-    queue: Arc<Queue>, resolution: u32,
+    queue: Arc<Queue>, dim_x: u32, dim_y: u32, dim_z: u32,
 ) -> Arc<ImageView> {
-    let total_voxels = (resolution as usize).pow(3);
+    let total_voxels = (dim_x as usize).max(1) * (dim_y as usize).max(1) * (dim_z as usize).max(1);
     let zeros = vec![0u8; total_voxels.max(1)];
     create_color_index_image_view(
         memory_allocator,
         command_buffer_allocator,
         queue,
         zeros,
-        resolution,
+        dim_x,
+        dim_y,
+        dim_z,
     )
 }
 

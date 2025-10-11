@@ -32,7 +32,7 @@ layout(set = 1, binding = 2) readonly buffer PaletteBuffer {
 };
 // Per-grid metadata buffer (dynamic length = voxel_count)
 struct GridInfo {
-    uint resolution; // storage cube resolution
+    uint resolution; // legacy (kept for backward compatibility; not used for addressing now)
     float originX;   // world-space origin.x
     float originY;   // world-space origin.y (new for 2D packing)
     uint dimX;       // actual content dims (<= resolution)
@@ -63,7 +63,7 @@ vec3 stepsToInferno(uint steps, uint start, uint end) {
 }
 
 bool readVoxel(uvec3 coord, inout uvec4 texel, inout ivec3 texel_coord, int gridIndex) {
-    // Designed to match src\voxelize.rs:voxelize_mesh()
+    // Uses per-grid storage block dimensions (4x4x8 voxels per texel) independent of cubic "resolution".
     ivec3 new_texel_coord = ivec3(coord.x / 4, coord.y / 4, coord.z / 8);
     if (new_texel_coord != texel_coord) {
         texel_coord = new_texel_coord;
@@ -74,7 +74,7 @@ bool readVoxel(uvec3 coord, inout uvec4 texel, inout ivec3 texel_coord, int grid
 
 const float FLT_MAX = 3.4028235e+38;
 
-bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, uint storage_resolution, out vec3 color, inout uint steps) {
+bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, out vec3 color, inout uint steps) {
     vec3 inv_dir = 1. / dir;
     vec3 sgn_dir = sign(inv_dir);
     inv_dir = clamp(inv_dir, vec3(-FLT_MAX), vec3(FLT_MAX));
@@ -355,7 +355,7 @@ void main() {
         uvec3 dims = uvec3(gridInfos[gridIdx].dimX, gridInfos[gridIdx].dimY, gridInfos[gridIdx].dimZ);
         vec3 localOrigin = ro - vec3(originsX[gridIdx], originsY[gridIdx], 0);
         uint stepsBefore = steps;
-        if (traversal(gridIdx, localOrigin, rd, dims, storageRes, color, steps)) {
+        if (traversal(gridIdx, localOrigin, rd, dims, color, steps)) {
             hit = true;
             if (pc.render_mode != STEPS) {
                 imageStore(targetImage, pixelCoord, vec4(color, 1));

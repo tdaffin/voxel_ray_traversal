@@ -5,8 +5,8 @@ use winit::event_loop::EventLoop;
 
 use crate::{
     app::App, camera::Camera, frame_timer::FrameTimer, gpu::GpuContext,
-    input_controller::InputController, model_discovery::discover_models,
-    pipelines::PipelineManager, render_mode::RenderMode, voxel_facade::VoxelSystem,
+    input_controller::InputController, pipelines::PipelineManager, render_mode::RenderMode,
+    voxel_facade::VoxelSystem,
 };
 use winit_input_helper::WinitInputHelper;
 
