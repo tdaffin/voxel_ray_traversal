@@ -1,6 +1,6 @@
 use egui_winit_vulkano::egui::{self, Color32};
 
-use crate::{app::App, model::Model, render_mode::RenderMode, rendering::get_images_and_sets};
+use crate::{app::App, render_mode::RenderMode, rendering::get_images_and_sets};
 
 /// Return values from a UI frame
 /// (request_regen_voxels, trigger_benchmark)
@@ -29,12 +29,10 @@ impl App {
                     }
                 });
                 ui.separator();
+                let max_grids = self.voxel.manager.models.len().max(1) as u32;
                 ui.add(
-                    egui::Slider::new(
-                        &mut self.voxel.manager.active_voxel_grids,
-                        1..=Model::ALL.len() as u32,
-                    )
-                    .text("Active Grids"),
+                    egui::Slider::new(&mut self.voxel.manager.active_voxel_grids, 1..=max_grids)
+                        .text("Active Grids"),
                 );
                 if ui.button("Benchmark Traversal Variants").clicked() {
                     trigger_benchmark = true;
@@ -104,11 +102,10 @@ impl App {
                         self.future_grid_resolutions[i] = val;
                     }
                 }
-                ui.horizontal(|ui| {
-                    for &model in Model::ALL {
-                        ui.selectable_value(&mut self.model, model, format!("{:?}", model));
-                    }
-                });
+                ui.label("Discovered Models:");
+                for (i, m) in self.voxel.manager.models.iter().enumerate() {
+                    ui.label(format!("{}: {} ({})", i, m.name, m.extension));
+                }
                 if ui.button("Regenerate Grids").clicked() {
                     request_regen_voxels = true;
                 }

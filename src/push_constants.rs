@@ -1,4 +1,3 @@
-use crate::model::Model;
 use crate::voxel_job::VoxelManager;
 use nalgebra::{Matrix4, Vector3, Vector4};
 
@@ -29,7 +28,8 @@ pub fn build_push_constants(input: PushConstantsInput) -> PushConstants {
     scale_and_center.set_column(3, &Vector3::from_element(0.5 * size).push(1.0));
     let pixel_to_ray = scale_and_center * input.cam_pixel_to_ray;
 
-    let voxel_count = input.voxel.active_voxel_grids.min(Model::ALL.len() as u32).max(1).min(4);
+    // Temporarily still cap at 4 until shader grid expansion implemented.
+    let voxel_count = input.voxel.active_voxel_grids.max(1).min(4);
     let mut resolutions = [0u32; 4];
     for (i, r) in input.voxel.grid_resolutions.iter().take(4).enumerate() {
         resolutions[i] = *r;

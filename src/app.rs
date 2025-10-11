@@ -17,7 +17,6 @@ use winit::{
 use crate::camera::Camera;
 use crate::frame_timer::FrameTimer;
 use crate::gpu::GpuContext;
-use crate::model::Model;
 use crate::pipelines::PipelineManager;
 // push_constants now handled inside frame_renderer
 use crate::app_builder::AppBuilder;
@@ -36,7 +35,6 @@ pub struct App {
     // Voxel subsystem
     pub(crate) voxel: VoxelSystem,
     pub(crate) future_grid_resolutions: Vec<u32>,
-    pub(crate) model: Model,
 
     pub(crate) camera: Camera,
     pub(crate) render_mode: RenderMode,
@@ -52,7 +50,7 @@ pub struct App {
 impl App {
     pub(crate) fn from_parts(
         gpu: GpuContext, pipelines: PipelineManager, voxel: VoxelSystem,
-        future_grid_resolutions: Vec<u32>, model: Model, camera: Camera, render_mode: RenderMode,
+        future_grid_resolutions: Vec<u32>, camera: Camera, render_mode: RenderMode,
         render_scale: f32, input: InputController, frame_timer: FrameTimer,
     ) -> Self {
         App {
@@ -60,7 +58,6 @@ impl App {
             pipelines,
             voxel,
             future_grid_resolutions,
-            model,
             camera,
             render_mode,
             render_scale,

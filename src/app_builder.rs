@@ -5,8 +5,8 @@ use winit::event_loop::EventLoop;
 
 use crate::{
     app::App, camera::Camera, frame_timer::FrameTimer, gpu::GpuContext,
-    input_controller::InputController, model::Model, pipelines::PipelineManager,
-    render_mode::RenderMode, voxel_facade::VoxelSystem,
+    input_controller::InputController, model_discovery::discover_models,
+    pipelines::PipelineManager, render_mode::RenderMode, voxel_facade::VoxelSystem,
 };
 use winit_input_helper::WinitInputHelper;
 
@@ -18,7 +18,6 @@ const DEFAULT_WINDOW_RESOLUTION: PhysicalSize<u32> = PhysicalSize::new(960, 960)
 #[allow(dead_code)] // Builder setters may be unused in some binaries until customization is added
 pub struct AppBuilder {
     pub initial_voxel_resolution: u32,
-    pub model: Model,
     pub render_mode: RenderMode,
     pub render_scale: f32,
     pub window_resolution: PhysicalSize<u32>,
@@ -29,7 +28,7 @@ impl Default for AppBuilder {
     fn default() -> Self {
         Self {
             initial_voxel_resolution: DEFAULT_INITIAL_VOXEL_RESOLUTION,
-            model: Model::Bunny,
+            // no single selected model now (dynamic discovery)
             render_mode: RenderMode::Shade,
             render_scale: 1.0,
             window_resolution: DEFAULT_WINDOW_RESOLUTION,
@@ -45,10 +44,6 @@ impl AppBuilder {
     }
     pub fn voxel_resolution(mut self, r: u32) -> Self {
         self.initial_voxel_resolution = r;
-        self
-    }
-    pub fn model(mut self, m: Model) -> Self {
-        self.model = m;
         self
     }
     pub fn render_mode(mut self, rm: RenderMode) -> Self {
@@ -86,7 +81,8 @@ impl AppBuilder {
         let future_grid_resolutions = voxel.manager.grid_resolutions.clone();
 
         // Camera setup: derive layout from number of active grids (initially all models voxelize eventually)
-        let grid_count = Model::ALL.len() as f64; // approximate upper bound; actual active may be fewer early
+        let disc = discover_models();
+        let grid_count = disc.len().max(1) as f64; // approximate upper bound; actual active may be fewer early
         let base_res = 1.0f64; // normalized unit size per grid before scaling by its own resolution in shader math
         let spacing_scale = 0.25; // must match shader spacing ratio
         let spacing = base_res * spacing_scale;
@@ -109,7 +105,6 @@ impl AppBuilder {
             pipelines,
             voxel,
             future_grid_resolutions,
-            self.model,
             camera,
             self.render_mode,
             self.render_scale,

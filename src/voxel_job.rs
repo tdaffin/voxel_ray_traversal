@@ -16,7 +16,7 @@ use vulkano::memory::allocator::StandardMemoryAllocator;
 
 use crate::{
     hot_reload::HotReloadComputePipeline,
-    model::Model,
+    model_discovery::{DiscoveredModel, discover_models},
     voxel::{build_voxel_descriptor_set, create_empty_voxel_placeholder, create_voxel_image_view},
     voxelize,
 };
@@ -31,6 +31,7 @@ pub enum VoxelJobMessage {
 
 /// Manages voxel grid generation jobs, descriptor set, and progress.
 pub struct VoxelManager {
+    pub models: Vec<DiscoveredModel>,
     pub voxel_set: Arc<DescriptorSet>,
     pub voxel_resolution: u32,
     pub grid_resolutions: Vec<u32>,
@@ -58,7 +59,9 @@ impl VoxelManager {
         command_buffer_allocator: Arc<StandardCommandBufferAllocator>, queue: Arc<Queue>,
         render_pipeline: &HotReloadComputePipeline,
     ) -> Self {
-        let grid_resolutions = vec![initial_resolution; Model::ALL.len()];
+        let models = discover_models();
+        let model_count = models.len().max(1); // avoid div by zero in palette math
+        let grid_resolutions = vec![initial_resolution; model_count];
         let future_grid_resolutions = grid_resolutions.clone();
         let placeholder_view = create_empty_voxel_placeholder(
             memory_allocator.clone(),
@@ -97,15 +100,15 @@ impl VoxelManager {
         );
         let (tx, rx) = mpsc::channel();
         let voxel_generation = 1u64;
-        for (idx, model) in Model::ALL.iter().enumerate() {
+        for (idx, model) in models.iter().enumerate() {
             let txc = tx.clone();
-            let path = model.path().as_ref().to_path_buf();
+            let path = model.path.clone();
             let res = grid_resolutions[idx];
             let generation_id = voxel_generation;
-            let base_palette_index = (idx as u32 * (256 / Model::ALL.len() as u32)) as u8;
+            let base_palette_index = (idx as u32 * (256 / model_count as u32)) as u8;
             // Each model gets a contiguous 16-color sub-range (low nibble variation added during voxel write).
             thread::spawn(move || {
-                let palette_span = (256 / Model::ALL.len() as u32) as u8; // subrange reserved per model
+                let palette_span = (256 / model_count as u32) as u8; // subrange reserved per model
                 let (vox, colors, palette_opt) =
                     if path.extension().and_then(|e| e.to_str()) == Some("vox") {
                         if let Some((v, c, p)) = crate::voxelize_vox::vox_to_voxels(
@@ -144,13 +147,14 @@ impl VoxelManager {
             });
         }
         drop(tx);
-        let voxel_views = vec![None; Model::ALL.len()];
-        let color_index_views = vec![None; Model::ALL.len()];
-        let voxel_pending = vec![true; Model::ALL.len()];
-        let voxel_progress = vec![(0, 0); Model::ALL.len()];
+        let voxel_views = vec![None; model_count];
+        let color_index_views = vec![None; model_count];
+        let voxel_pending = vec![true; model_count];
+        let voxel_progress = vec![(0, 0); model_count];
         let voxel_cancel_flag = Arc::new(AtomicBool::new(false));
-        let active_voxel_grids = Model::ALL.len() as u32;
+        let active_voxel_grids = model_count as u32;
         Self {
+            models,
             voxel_set,
             voxel_resolution: initial_resolution,
             grid_resolutions,
@@ -318,16 +322,17 @@ impl VoxelManager {
         self.voxel_result_rx = rx;
         let generation_id = self.voxel_generation;
         let cancel_flag = self.voxel_cancel_flag.clone();
-        for (idx, model) in Model::ALL.iter().enumerate() {
+        let model_count = self.models.len().max(1);
+        for (idx, model) in self.models.iter().enumerate() {
             let txc = tx.clone();
-            let path = model.path().as_ref().to_path_buf();
+            let path = model.path.clone();
             let gen_thread = generation_id;
             let cancel_local = cancel_flag.clone();
             let res_for_grid = self.grid_resolutions[idx];
             thread::spawn(move || {
                 use crate::voxelize::{VoxelProgressCallbacks, ply_to_voxels_with_progress};
                 let cancelled = cancel_local.clone();
-                let base_palette_index = (idx as u32 * (256 / Model::ALL.len() as u32)) as u8;
+                let base_palette_index = (idx as u32 * (256 / model_count as u32)) as u8;
                 // Matches logic in initial spawn; ensures deterministic palette mapping.
                 let prog_cb = VoxelProgressCallbacks {
                     cancelled: &cancelled,
@@ -345,7 +350,7 @@ impl VoxelManager {
                 };
                 if path.extension().and_then(|e| e.to_str()) == Some("vox") {
                     // No progress callbacks for .vox yet (fast load typically); still send palette slice.
-                    let palette_span = (256 / Model::ALL.len() as u32) as u8;
+                    let palette_span = (256 / model_count as u32) as u8;
                     if let Some((vox, colors, palette_slice)) = crate::voxelize_vox::vox_to_voxels(
                         &path,
                         res_for_grid,
