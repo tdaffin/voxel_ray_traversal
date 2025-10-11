@@ -20,8 +20,9 @@ pub struct VoxLoadResult {
 }
 
 pub fn vox_to_voxels(
-    path: impl AsRef<Path>, target_resolution: Option<u32>, base_palette_index: u8,
-    palette_span: u8,
+    path: impl AsRef<Path>,
+    target_resolution: Option<u32>,
+    palette_span: u8, // maximum colors to keep (local palette length cap)
 ) -> Option<VoxLoadResult> {
     #[allow(dead_code)]
     const _VOX_LOADER_VERSION: &str = "vox_loader_v1";
@@ -75,10 +76,10 @@ pub fn vox_to_voxels(
         let bit = (x % 4) * 32 + (y % 4) + (z % 8) * 4;
         voxels[texel] |= 1u128 << bit;
         let orig = v.i as usize; // 0..255
-        let mapped = if remap[orig] != 0 || orig == 0 {
+        let mapped_local = if remap[orig] != 0 || orig == 0 {
             remap[orig]
         } else {
-            // Need to allocate new slot in local subrange
+            // allocate a new local slot (0..palette_span-1)
             if used_colors.len() < palette_span as usize {
                 let pal = palette_rgba[orig];
                 let rgba = [
@@ -89,15 +90,13 @@ pub fn vox_to_voxels(
                 ];
                 used_colors.push(rgba);
                 let local_offset = used_colors.len() as u8 - 1;
-                let global_index = base_palette_index.saturating_add(local_offset);
-                remap[orig] = global_index.max(1); // keep 0 reserved if orig==0
+                remap[orig] = local_offset.max(1); // keep 0 for empty if orig==0
                 remap[orig]
             } else {
-                // Subrange full: reuse first slot (could be improved with nearest-color mapping)
-                base_palette_index
+                0 // fallback to first color if we exceeded span
             }
         };
-        colors[(z * sy + y) * sx + x] = mapped;
+        colors[(z * sy + y) * sx + x] = mapped_local;
     }
     Some(VoxLoadResult {
         voxels,

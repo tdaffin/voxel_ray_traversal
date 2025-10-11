@@ -182,10 +182,9 @@ fn voxelize_mesh_progress(
             let texel = (tx + (ty + tz * storage_h as usize) * storage_w as usize) as usize;
             let bit = (x % 4) * 32 + (y % 4) + (z % 8) * 4;
             voxels[texel] |= 1u128 << bit;
-            // Procedural palette index: gradient based on z (0..255 wrap)
-            // Assign index as base + small variation by z to avoid flat color per model
-            let idx = base_palette_index.wrapping_add((z as u8) & 0x0F);
-            color_indices[(z * dy as usize + y) * dx as usize + x] = idx;
+            // Procedural local palette index: gradient based on z low 4 bits (0..15)
+            let idx_local = (z as u8) & 0x0F;
+            color_indices[(z * dy as usize + y) * dx as usize + x] = idx_local;
         });
         processed += 1;
         if processed % 256 == 0 {

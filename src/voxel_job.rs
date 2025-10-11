@@ -43,7 +43,7 @@ pub enum VoxelJobMessage {
     },
     PaletteSlice {
         generation: u64,
-        base: u8,
+        index: usize,
         colors: Vec<[f32; 4]>,
     },
     Progress {
@@ -76,6 +76,10 @@ pub struct VoxelManager {
     placeholder_view: Arc<ImageView>,
     placeholder_color_view: Arc<ImageView>,
     palette_buffer: Subbuffer<[[f32; 4]]>,
+    // Step8: collect per-grid palette slices (local indices) for compaction.
+    palette_slices: Vec<Option<Vec<[f32; 4]>>>,
+    palette_bases: Vec<u32>,
+    palette_lens: Vec<u32>,
     voxel_result_rx: Receiver<VoxelJobMessage>,
     voxel_generation: u64,
     cancel_requested: bool,
@@ -160,10 +164,9 @@ impl VoxelManager {
             let path = model.path.clone();
             let res = grid_resolutions[idx];
             let generation_id = voxel_generation;
-            let base_palette_index = (idx as u32 * (256 / model_count as u32)) as u8;
-            // Each model gets a contiguous 16-color sub-range (low nibble variation added during voxel write).
+            // Legacy base_palette_index removed; indices now local per grid until compaction.
             thread::spawn(move || {
-                let palette_span = (256 / model_count as u32) as u8; // subrange reserved per model
+                let palette_span = (256 / model_count as u32) as u8; // soft cap per model prior to compaction
                 let (vox, colors, palette_opt, dims_opt, storage_opt) =
                     if path.extension().and_then(|e| e.to_str()) == Some("vox") {
                         if !path.exists() {
@@ -175,12 +178,9 @@ impl VoxelManager {
                                 None,
                                 None,
                             )
-                        } else if let Some(result) = crate::voxelize_vox::vox_to_voxels(
-                            &path,
-                            None,
-                            base_palette_index,
-                            palette_span,
-                        ) {
+                        } else if let Some(result) =
+                            crate::voxelize_vox::vox_to_voxels(&path, None, palette_span)
+                        {
                             let v = result.voxels;
                             let c = result.colors;
                             let p = result.palette;
@@ -206,8 +206,8 @@ impl VoxelManager {
                             )
                         }
                     } else {
-                        let (v, c, logical, storage) =
-                            voxelize::ply_to_voxels(&path, res, base_palette_index);
+                        // PLY path now uses local 0-based palette indices; pass 0 (ignored in implementation)
+                        let (v, c, logical, storage) = voxelize::ply_to_voxels(&path, res, 0);
                         (v, c, None, Some(logical), Some(storage))
                     };
                 let used_res = res; // keep legacy resolution for now (could be dim max)
@@ -233,8 +233,19 @@ impl VoxelManager {
                 if let Some(pslice) = palette_opt {
                     let _ = txc.send(VoxelJobMessage::PaletteSlice {
                         generation: generation_id,
-                        base: base_palette_index,
+                        index: idx,
                         colors: pslice,
+                    });
+                } else {
+                    // PLY placeholder: generate simple 16-color grayscale slice matching previous procedural use
+                    let mut slice = Vec::new();
+                    for i in 0..16u8 {
+                        slice.push([i as f32 / 15.0, i as f32 / 15.0, i as f32 / 15.0, 1.0]);
+                    }
+                    let _ = txc.send(VoxelJobMessage::PaletteSlice {
+                        generation: generation_id,
+                        index: idx,
+                        colors: slice,
                     });
                 }
             });
@@ -262,6 +273,9 @@ impl VoxelManager {
             placeholder_view,
             placeholder_color_view,
             palette_buffer,
+            palette_slices: vec![None; model_count],
+            palette_bases: vec![0; model_count],
+            palette_lens: vec![0; model_count],
             voxel_result_rx: rx,
             voxel_generation,
             cancel_requested: false,
@@ -296,8 +310,8 @@ impl VoxelManager {
                     storage_w,
                     storage_h,
                     storage_d,
-                    palette_base,
-                    palette_len,
+                    palette_base: _,
+                    palette_len: _,
                 } => {
                     if generation != self.voxel_generation || self.cancel_requested {
                         continue;
@@ -339,21 +353,12 @@ impl VoxelManager {
                         // TODO Step8: store per-grid palette_base/len in parallel vectors, update later
                     }
                 }
-                VoxelJobMessage::PaletteSlice { generation, base, colors } => {
+                VoxelJobMessage::PaletteSlice { generation, index, colors } => {
                     if generation != self.voxel_generation || self.cancel_requested {
                         continue;
                     }
-                    if !colors.is_empty() {
-                        if let Ok(mut data) = self.palette_buffer.write() {
-                            let mut dst = base as usize;
-                            for c in colors.iter() {
-                                if dst >= 256 {
-                                    break;
-                                }
-                                data[dst] = *c;
-                                dst += 1;
-                            }
-                        }
+                    if index < self.palette_slices.len() {
+                        self.palette_slices[index] = Some(colors);
                     }
                 }
                 VoxelJobMessage::Cancelled { generation } => {
@@ -452,6 +457,34 @@ impl VoxelManager {
                 }
                 if !current_row.is_empty() {
                     let _ = place_row(&current_row, row_y, &mut infos);
+                }
+                // If all grids are ready and we have palette slices for each, perform compaction.
+                let all_ready = self.voxel_pending.iter().all(|p| !*p)
+                    && self.palette_slices.iter().all(|s| s.is_some());
+                if all_ready {
+                    // Build compact palette by concatenation; assign bases.
+                    let mut compact: Vec<[f32; 4]> = Vec::new();
+                    for (i, slice_opt) in self.palette_slices.iter().enumerate() {
+                        if let Some(slice) = slice_opt {
+                            self.palette_bases[i] = compact.len() as u32;
+                            self.palette_lens[i] = slice.len() as u32;
+                            compact.extend_from_slice(slice);
+                        } else {
+                            self.palette_bases[i] = 0;
+                            self.palette_lens[i] = 0;
+                        }
+                    }
+                    if compact.is_empty() {
+                        compact.push([1.0, 1.0, 1.0, 1.0]);
+                    }
+                    // Recreate palette buffer with compact data
+                    self.palette_buffer =
+                        crate::voxel::create_palette_buffer(memory_allocator.clone(), &compact);
+                    // Update infos with palette base/len
+                    for (i, gi) in infos.iter_mut().enumerate() {
+                        gi.palette_base = self.palette_bases.get(i).copied().unwrap_or(0);
+                        gi.palette_len = self.palette_lens.get(i).copied().unwrap_or(0);
+                    }
                 }
                 let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &infos);
                 self.voxel_set = build_voxel_descriptor_set(
@@ -553,8 +586,7 @@ impl VoxelManager {
             thread::spawn(move || {
                 use crate::voxelize::{VoxelProgressCallbacks, ply_to_voxels_with_progress};
                 let cancelled = cancel_local.clone();
-                let base_palette_index = (idx as u32 * (256 / model_count as u32)) as u8;
-                // Matches logic in initial spawn; ensures deterministic palette mapping.
+                // Base palette index legacy removed; indices are local until compaction.
                 let prog_cb = VoxelProgressCallbacks {
                     cancelled: &cancelled,
                     progress: Some(Box::new({
@@ -575,12 +607,9 @@ impl VoxelManager {
                     if !path.exists() {
                         eprintln!("[voxel] .vox file missing: {}", path.display());
                         let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
-                    } else if let Some(result) = crate::voxelize_vox::vox_to_voxels(
-                        &path,
-                        None,
-                        base_palette_index,
-                        palette_span,
-                    ) {
+                    } else if let Some(result) =
+                        crate::voxelize_vox::vox_to_voxels(&path, None, palette_span)
+                    {
                         let vox = result.voxels;
                         let colors = result.colors;
                         let palette_slice = result.palette;
@@ -609,7 +638,7 @@ impl VoxelManager {
                             if !palette_slice.is_empty() {
                                 let _ = txc.send(VoxelJobMessage::PaletteSlice {
                                     generation: gen_thread,
-                                    base: base_palette_index,
+                                    index: idx,
                                     colors: palette_slice,
                                 });
                             }
@@ -622,7 +651,7 @@ impl VoxelManager {
                     if let Some((vox, colors, _logical, _storage)) = ply_to_voxels_with_progress(
                         &path,
                         res_for_grid,
-                        base_palette_index,
+                        0, // local indices only
                         prog_cb,
                     ) {
                         if !cancelled.load(Ordering::Relaxed) {
@@ -640,6 +669,21 @@ impl VoxelManager {
                                 storage_d: res_for_grid / 8,
                                 palette_base: 0,
                                 palette_len: 16, // PLY procedural palette currently 16-shade gradient
+                            });
+                            // Emit procedural palette slice (grayscale ramp)
+                            let mut slice = Vec::new();
+                            for i in 0..16u8 {
+                                slice.push([
+                                    i as f32 / 15.0,
+                                    i as f32 / 15.0,
+                                    i as f32 / 15.0,
+                                    1.0,
+                                ]);
+                            }
+                            let _ = txc.send(VoxelJobMessage::PaletteSlice {
+                                generation: gen_thread,
+                                index: idx,
+                                colors: slice,
                             });
                         } else {
                             let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
