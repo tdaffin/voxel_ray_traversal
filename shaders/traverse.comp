@@ -38,7 +38,9 @@ struct GridInfo {
     uint dimX;       // actual content dims (<= resolution)
     uint dimY;
     uint dimZ;
-    uint _pad0;
+    uint storageW;   // packed texel width (currently resolution/4)
+    uint storageH;   // packed texel height (currently resolution/4)
+    uint storageD;   // packed texel depth (currently resolution/8)
 };
 layout(set = 1, binding = 3) readonly buffer GridInfoBuffer { GridInfo gridInfos[]; };
 

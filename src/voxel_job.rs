@@ -125,7 +125,9 @@ impl VoxelManager {
             dim_x: initial_resolution,
             dim_y: initial_resolution,
             dim_z: initial_resolution,
-            _pad0: 0,
+            storage_w: initial_resolution / 4,
+            storage_h: initial_resolution / 4,
+            storage_d: initial_resolution / 8,
         }];
         let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
         let voxel_set = build_voxel_descriptor_set(
@@ -365,6 +367,9 @@ impl VoxelManager {
                     let mut x = 0.0f32;
                     let mut max_h = 0.0f32;
                     for &(orig_index, res, dx, dy, dz) in row.iter() {
+                        let storage_w = res / 4; // existing cubic assumption
+                        let storage_h = res / 4;
+                        let storage_d = res / 8;
                         infos[orig_index] = GridInfo {
                             resolution: res,
                             origin_x: x,
@@ -372,7 +377,9 @@ impl VoxelManager {
                             dim_x: dx,
                             dim_y: dy,
                             dim_z: dz,
-                            _pad0: 0,
+                            storage_w,
+                            storage_h,
+                            storage_d,
                         };
                         x += dx as f32 * (1.0 + PADDING);
                         max_h = max_h.max(dy as f32 * (1.0 + PADDING));
@@ -475,7 +482,9 @@ impl VoxelManager {
             dim_x: self.voxel_resolution,
             dim_y: self.voxel_resolution,
             dim_z: self.voxel_resolution,
-            _pad0: 0,
+            storage_w: self.voxel_resolution / 4,
+            storage_h: self.voxel_resolution / 4,
+            storage_d: self.voxel_resolution / 8,
         }];
         let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
         self.voxel_set = build_voxel_descriptor_set(
