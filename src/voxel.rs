@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use vulkano::buffer::BufferContents;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage, CopyBufferToImageInfo,
@@ -14,12 +15,39 @@ use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, Standar
 use vulkano::pipeline::Pipeline; // for layout() method
 use vulkano::pipeline::compute::ComputePipeline;
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, BufferContents)]
+pub struct GridInfo {
+    pub resolution: u32,
+    pub origin_x: f32,
+    pub _pad0: f32,
+    pub _pad1: f32,
+}
+
+pub fn create_grid_info_buffer(
+    memory_allocator: Arc<StandardMemoryAllocator>, infos: &[GridInfo],
+) -> Subbuffer<[GridInfo]> {
+    let usage = BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST;
+    Buffer::from_iter(
+        memory_allocator,
+        BufferCreateInfo { usage, ..Default::default() },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        infos.iter().cloned(),
+    )
+    .expect("Failed to create grid info buffer")
+}
+
 /// Build descriptor set (set=1) for an arbitrary number of voxel 3D image views.
 /// The shader must declare matching bindings [0..N-1].
 pub fn build_voxel_descriptor_set(
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     render_pipeline: &ComputePipeline, image_views: &[Arc<ImageView>],
     color_index_views: &[Arc<ImageView>], palette_buffer: Subbuffer<[[f32; 4]]>,
+    grid_info_buffer: Subbuffer<[GridInfo]>,
 ) -> Arc<DescriptorSet> {
     assert!(!image_views.is_empty(), "Need at least one voxel image view");
     const MAX_GRIDS: usize = 32; // keep in sync with shader
@@ -38,6 +66,7 @@ pub fn build_voxel_descriptor_set(
         WriteDescriptorSet::image_view_array(0, 0, padded.iter().cloned()),
         WriteDescriptorSet::image_view_array(1, 0, padded_colors.iter().cloned()),
         WriteDescriptorSet::buffer(2, palette_buffer.clone()),
+        WriteDescriptorSet::buffer(3, grid_info_buffer.clone()),
     ];
     DescriptorSet::new(descriptor_set_allocator, layout, writes, [])
         .expect("Failed to create voxel descriptor set (array)")

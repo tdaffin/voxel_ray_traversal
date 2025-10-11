@@ -17,7 +17,10 @@ use vulkano::memory::allocator::StandardMemoryAllocator;
 use crate::{
     hot_reload::HotReloadComputePipeline,
     model_discovery::{DiscoveredModel, discover_models},
-    voxel::{build_voxel_descriptor_set, create_empty_voxel_placeholder, create_voxel_image_view},
+    voxel::{
+        GridInfo, build_voxel_descriptor_set, create_empty_voxel_placeholder,
+        create_grid_info_buffer, create_voxel_image_view,
+    },
     voxelize,
 };
 
@@ -91,12 +94,16 @@ impl VoxelManager {
         }
         let palette_buffer =
             crate::voxel::create_palette_buffer(memory_allocator.clone(), &palette);
+        // Initial grid info (single placeholder)
+        let gi = [GridInfo { resolution: initial_resolution, origin_x: 0.0, ..Default::default() }];
+        let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
         let voxel_set = build_voxel_descriptor_set(
             descriptor_set_allocator.clone(),
             render_pipeline,
             std::slice::from_ref(&placeholder_view),
             std::slice::from_ref(&placeholder_color_view),
             palette_buffer.clone(),
+            grid_info_buffer.clone(),
         );
         let (tx, rx) = mpsc::channel();
         let voxel_generation = 1u64;
@@ -253,12 +260,27 @@ impl VoxelManager {
             }
             self.active_voxel_grids = ready.len() as u32;
             if self.active_voxel_grids > 0 {
+                // Build grid info array with precomputed origins (spacing 25% of each grid size)
+                let mut infos: Vec<GridInfo> = Vec::new();
+                let mut cursor = 0.0f32;
+                for (i, view) in ready.iter().enumerate() {
+                    let res =
+                        self.grid_resolutions.get(i).copied().unwrap_or(self.voxel_resolution);
+                    infos.push(GridInfo {
+                        resolution: res,
+                        origin_x: cursor,
+                        ..Default::default()
+                    });
+                    cursor += res as f32 * 1.25; // size + 25% spacing
+                }
+                let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &infos);
                 self.voxel_set = build_voxel_descriptor_set(
                     descriptor_set_allocator.clone(),
                     render_pipeline,
                     &ready,
                     &ready_colors,
                     self.palette_buffer.clone(),
+                    grid_info_buffer,
                 );
             }
         }
@@ -290,12 +312,16 @@ impl VoxelManager {
             queue.clone(),
             placeholder_resolution,
         );
-        self.start_background_voxelization(descriptor_set_allocator, render_pipeline);
+        self.start_background_voxelization(
+            descriptor_set_allocator,
+            render_pipeline,
+            memory_allocator.clone(),
+        );
     }
 
     fn start_background_voxelization(
         &mut self, descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-        render_pipeline: &HotReloadComputePipeline,
+        render_pipeline: &HotReloadComputePipeline, memory_allocator: Arc<StandardMemoryAllocator>,
     ) {
         for v in &mut self.voxel_views {
             *v = None;
@@ -311,12 +337,16 @@ impl VoxelManager {
         for p in &mut self.voxel_progress {
             *p = (0, 0);
         }
+        let gi =
+            [GridInfo { resolution: self.voxel_resolution, origin_x: 0.0, ..Default::default() }];
+        let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
         self.voxel_set = build_voxel_descriptor_set(
             descriptor_set_allocator.clone(),
             render_pipeline,
             std::slice::from_ref(&self.placeholder_view),
             std::slice::from_ref(&self.placeholder_color_view),
             self.palette_buffer.clone(),
+            grid_info_buffer,
         );
         let (tx, rx) = mpsc::channel();
         self.voxel_result_rx = rx;

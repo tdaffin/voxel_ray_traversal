@@ -16,9 +16,6 @@ layout(push_constant) uniform PushConstants {
     vec4 lightDir; // xyz = normalized light direction, w unused
     uint voxel_count;
     uint render_mode;
-    uvec2 _pad; // alignment padding
-    uvec4 resolutions; // per-grid resolutions (only first voxel_count used)
-    uvec3 _pad2; // padding to match Rust layout (size = 124 bytes total)
 } pc;
 
 layout(set = 0, binding = 0, rgba8) writeonly uniform image2D targetImage;
@@ -33,6 +30,13 @@ layout(set = 1, binding = 1, r8ui) readonly uniform uimage3D voxelColorIndices[M
 layout(set = 1, binding = 2) readonly buffer PaletteBuffer {
     vec4 palette[]; // size announced by host; expected <= 256
 };
+// Per-grid metadata buffer (dynamic length = voxel_count)
+struct GridInfo {
+    uint resolution; // voxel resolution per grid
+    float originX;   // world-space origin.x for this grid
+    float _pad0; float _pad1; // 16-byte alignment per entry
+};
+layout(set = 1, binding = 3) readonly buffer GridInfoBuffer { GridInfo gridInfos[]; };
 
 // https://www.shadertoy.com/view/WlfXRN
 vec3 inferno(float t) {
@@ -275,17 +279,12 @@ void main() {
     vec3 rd = mat3(pc.pixelToRay) * vec3(pixelCoord, 1);
 
     uint gridCount = pc.voxel_count;
-    // Precompute origins along X using each grid's own resolution plus 25% spacing of that grid size.
+    // Host now precomputes origins and writes them into gridInfos.
     float origins[MAX_GRIDS];
     float sizes[MAX_GRIDS];
-    float cursor = 0.0;
     for (uint g = 0; g < gridCount; ++g) {
-        uint res = pc.resolutions[g];
-        float size = float(res);
-        float spacing = size * 0.25;
-        origins[g] = cursor;
-        sizes[g] = size;
-        cursor += size + spacing;
+        origins[g] = gridInfos[g].originX;
+        sizes[g]   = float(gridInfos[g].resolution);
     }
 
     // MAX_GRIDS defined above
@@ -344,7 +343,7 @@ void main() {
             if (abs(tmin - tEnter[order]) < 1e-5 && abs(tmax - tExit[order]) < 1e-5) { gridIdx = g; break; }
         }
         if (gridIdx < 0) continue; // shouldn't happen
-        uint vr = pc.resolutions[gridIdx];
+        uint vr = gridInfos[gridIdx].resolution;
         vec3 localOrigin = ro - vec3(origins[gridIdx], 0, 0);
         uint stepsBefore = steps;
         if (traversal(gridIdx, localOrigin, rd, vr, color, steps)) {
@@ -360,5 +359,5 @@ void main() {
     }
     // If no hit, optionally visualize steps vs first grid size (fallback)
     if (steps > 0 && pc.render_mode == STEPS && gridCount > 0)
-        renderSteps(pixelCoord, steps, pc.resolutions[0]);
+        renderSteps(pixelCoord, steps, gridInfos[0].resolution);
 }

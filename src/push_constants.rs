@@ -10,9 +10,6 @@ pub struct PushConstants {
     pub light_dir: [f32; 4],
     pub voxel_count: u32,
     pub render_mode: u32,
-    pub _pad: [u32; 2],
-    pub resolutions: [u32; 4],
-    pub _pad2: [u32; 3],
 }
 
 pub struct PushConstantsInput<'a> {
@@ -28,15 +25,7 @@ pub fn build_push_constants(input: PushConstantsInput) -> PushConstants {
     scale_and_center.set_column(3, &Vector3::from_element(0.5 * size).push(1.0));
     let pixel_to_ray = scale_and_center * input.cam_pixel_to_ray;
 
-    // Temporarily still cap at 4 until shader grid expansion implemented.
-    let voxel_count = input.voxel.active_voxel_grids.max(1).min(4);
-    let mut resolutions = [0u32; 4];
-    for (i, r) in input.voxel.grid_resolutions.iter().take(4).enumerate() {
-        resolutions[i] = *r;
-    }
-    if voxel_count as usize > input.voxel.grid_resolutions.len() {
-        resolutions[0] = input.voxel.voxel_resolution;
-    }
+    let voxel_count = input.voxel.active_voxel_grids.max(1); // no fixed cap now
 
     let ld = {
         let v = input.light_dir;
@@ -49,8 +38,5 @@ pub fn build_push_constants(input: PushConstantsInput) -> PushConstants {
         light_dir: ld,
         voxel_count,
         render_mode: input.render_mode,
-        _pad: [0, 0],
-        resolutions,
-        _pad2: [0; 3],
     }
 }
