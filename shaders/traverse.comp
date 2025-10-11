@@ -32,9 +32,12 @@ layout(set = 1, binding = 2) readonly buffer PaletteBuffer {
 };
 // Per-grid metadata buffer (dynamic length = voxel_count)
 struct GridInfo {
-    uint resolution; // voxel resolution per grid
-    float originX;   // world-space origin.x for this grid
-    float _pad0; float _pad1; // 16-byte alignment per entry
+    uint resolution; // storage cube resolution
+    float originX;   // world-space origin.x
+    uint dimX;       // actual content dims (<= resolution)
+    uint dimY;
+    uint dimZ;
+    uint _pad0;
 };
 layout(set = 1, binding = 3) readonly buffer GridInfoBuffer { GridInfo gridInfos[]; };
 

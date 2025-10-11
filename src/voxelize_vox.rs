@@ -10,8 +10,11 @@ pub struct VoxLoadResult {
     pub voxels: Vec<u128>,
     pub colors: Vec<u8>,
     pub palette: Vec<[f32; 4]>,
-    pub native_resolution: u32, // original largest source dimension
-    pub used_resolution: u32, // actual voxelization resolution used (may differ if target provided)
+    pub native_resolution: u32, // original largest source dimension (pre padding)
+    pub used_resolution: u32,   // storage resolution used (padded to multiples for packing)
+    pub dim_x: u32,             // original X dimension (no isotropic scaling applied)
+    pub dim_y: u32,             // original Y dimension
+    pub dim_z: u32,             // original Z dimension
 }
 
 pub fn vox_to_voxels(
@@ -33,15 +36,18 @@ pub fn vox_to_voxels(
     }
 
     let native_max = (sx.max(sy)).max(sz) as u32; // original largest dimension
-    let chosen = target_resolution.unwrap_or(native_max);
-    let res = chosen as usize;
-    if res == 0 {
+    let requested = target_resolution.unwrap_or(native_max);
+    // Storage resolution (cubic) – round up to multiple of 8 for packing (z/8) & 4 for x,y/4.
+    let mut chosen = requested.max(native_max);
+    if chosen == 0 {
         return None;
     }
+    if chosen % 8 != 0 {
+        chosen += 8 - (chosen % 8);
+    }
+    let res = chosen as usize;
     let mut voxels = vec![0u128; res * res * res / 128];
     let mut colors = vec![0u8; res * res * res];
-
-    let scale = (res as f32 - 1.0) / ((sx.max(sy)).max(sz)) as f32;
 
     // Build a remap table from MagicaVoxel color index -> local subrange offset
     // MagicaVoxel palette indices are 1..=255; 0 unused.
@@ -53,13 +59,13 @@ pub fn vox_to_voxels(
     // We'll lazily assign as voxels encountered to keep only used subset (up to span)
 
     for v in &model.voxels {
-        let x = (v.x as f32 * scale).round() as i32;
-        let y = (v.y as f32 * scale).round() as i32;
-        let z = (v.z as f32 * scale).round() as i32;
-        if x < 0 || y < 0 || z < 0 || x >= res as i32 || y >= res as i32 || z >= res as i32 {
+        // Preserve original coordinates (no isotropic scaling). Place directly into padded cubic volume.
+        let x = v.x as usize;
+        let y = v.y as usize;
+        let z = v.z as usize;
+        if x >= res || y >= res || z >= res {
             continue;
         }
-        let (x, y, z) = (x as usize, y as usize, z as usize);
         let texel = (x + ((y + (z / 8) * res) / 4) * res) / 4;
         let bit = (x % 4) * 32 + (y % 4) + (z % 8) * 4;
         voxels[texel] |= 1u128 << bit;
@@ -94,5 +100,8 @@ pub fn vox_to_voxels(
         palette: used_colors,
         native_resolution: native_max,
         used_resolution: chosen,
+        dim_x: sx as u32,
+        dim_y: sy as u32,
+        dim_z: sz as u32,
     })
 }

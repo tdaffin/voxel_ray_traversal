@@ -18,10 +18,12 @@ use vulkano::pipeline::compute::ComputePipeline;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, BufferContents)]
 pub struct GridInfo {
-    pub resolution: u32,
+    pub resolution: u32, // cubic storage resolution (power-of-two-ish padded)
     pub origin_x: f32,
-    pub _pad0: f32,
-    pub _pad1: f32,
+    pub dim_x: u32, // actual content dimensions (<= resolution)
+    pub dim_y: u32,
+    pub dim_z: u32,
+    pub _pad0: u32,
 }
 
 pub fn create_grid_info_buffer(

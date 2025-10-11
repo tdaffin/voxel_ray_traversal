@@ -26,10 +26,30 @@ use crate::{
 
 #[derive(Debug)]
 pub enum VoxelJobMessage {
-    Finished { generation: u64, index: usize, data: Vec<u128>, colors: Vec<u8>, resolution: u32 },
-    PaletteSlice { generation: u64, base: u8, colors: Vec<[f32; 4]> },
-    Progress { generation: u64, index: usize, done: usize, total: usize },
-    Cancelled { generation: u64 },
+    Finished {
+        generation: u64,
+        index: usize,
+        data: Vec<u128>,
+        colors: Vec<u8>,
+        resolution: u32,
+        dim_x: u32,
+        dim_y: u32,
+        dim_z: u32,
+    },
+    PaletteSlice {
+        generation: u64,
+        base: u8,
+        colors: Vec<[f32; 4]>,
+    },
+    Progress {
+        generation: u64,
+        index: usize,
+        done: usize,
+        total: usize,
+    },
+    Cancelled {
+        generation: u64,
+    },
 }
 
 /// Manages voxel grid generation jobs, descriptor set, and progress.
@@ -38,6 +58,7 @@ pub struct VoxelManager {
     pub voxel_set: Arc<DescriptorSet>,
     pub voxel_resolution: u32,
     pub grid_resolutions: Vec<u32>,
+    pub grid_dims: Vec<(u32, u32, u32)>,
     pub future_grid_resolutions: Vec<u32>,
     pub active_voxel_grids: u32,
 
@@ -65,6 +86,8 @@ impl VoxelManager {
         let models = discover_models();
         let model_count = models.len().max(1); // avoid div by zero in palette math
         let grid_resolutions = vec![initial_resolution; model_count];
+        let grid_dims =
+            vec![(initial_resolution, initial_resolution, initial_resolution); model_count];
         let future_grid_resolutions = grid_resolutions.clone();
         let placeholder_view = create_empty_voxel_placeholder(
             memory_allocator.clone(),
@@ -95,7 +118,14 @@ impl VoxelManager {
         let palette_buffer =
             crate::voxel::create_palette_buffer(memory_allocator.clone(), &palette);
         // Initial grid info (single placeholder)
-        let gi = [GridInfo { resolution: initial_resolution, origin_x: 0.0, ..Default::default() }];
+        let gi = [GridInfo {
+            resolution: initial_resolution,
+            origin_x: 0.0,
+            dim_x: initial_resolution,
+            dim_y: initial_resolution,
+            dim_z: initial_resolution,
+            _pad0: 0,
+        }];
         let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
         let voxel_set = build_voxel_descriptor_set(
             descriptor_set_allocator.clone(),
@@ -116,13 +146,14 @@ impl VoxelManager {
             // Each model gets a contiguous 16-color sub-range (low nibble variation added during voxel write).
             thread::spawn(move || {
                 let palette_span = (256 / model_count as u32) as u8; // subrange reserved per model
-                let (vox, colors, palette_opt, native_res_opt) =
+                let (vox, colors, palette_opt, native_res_opt, dims_opt) =
                     if path.extension().and_then(|e| e.to_str()) == Some("vox") {
                         if !path.exists() {
                             eprintln!("[voxel] .vox file missing: {}", path.display());
                             (
                                 vec![0u128; (res as usize).pow(3) / 128],
                                 vec![0u8; (res as usize).pow(3)],
+                                None,
                                 None,
                                 None,
                             )
@@ -136,13 +167,14 @@ impl VoxelManager {
                             let c = result.colors;
                             let p = result.palette;
                             let used_res = result.used_resolution;
+                            let dims_tuple = (result.dim_x, result.dim_y, result.dim_z);
                             if v.iter().all(|&u| u == 0) {
                                 eprintln!(
                                     "[voxel] WARNING: .vox produced empty voxel set: {}",
                                     path.display()
                                 );
                             }
-                            (v, c, Some(p), Some(used_res))
+                            (v, c, Some(p), Some(used_res), Some(dims_tuple))
                         } else {
                             eprintln!("[voxel] Failed to parse .vox file: {}", path.display());
                             (
@@ -150,19 +182,24 @@ impl VoxelManager {
                                 vec![0u8; (res as usize).pow(3)],
                                 None,
                                 None,
+                                None,
                             )
                         }
                     } else {
                         let (v, c) = voxelize::ply_to_voxels(&path, res, base_palette_index);
-                        (v, c, None, Some(res))
+                        (v, c, None, Some(res), Some((res, res, res)))
                     };
                 let used_res = native_res_opt.unwrap_or(res);
+                let (dx, dy, dz) = dims_opt.unwrap_or((used_res, used_res, used_res));
                 let _ = txc.send(VoxelJobMessage::Finished {
                     generation: generation_id,
                     index: idx,
                     data: vox,
                     colors,
                     resolution: used_res,
+                    dim_x: dx,
+                    dim_y: dy,
+                    dim_z: dz,
                 });
                 // transmit palette slice for .vox models so we can blend custom palette
                 if let Some(pslice) = palette_opt {
@@ -186,6 +223,7 @@ impl VoxelManager {
             voxel_set,
             voxel_resolution: initial_resolution,
             grid_resolutions,
+            grid_dims,
             future_grid_resolutions,
             active_voxel_grids,
             voxel_views,
@@ -217,7 +255,16 @@ impl VoxelManager {
                         self.voxel_progress[index] = (done, total);
                     }
                 }
-                VoxelJobMessage::Finished { generation, index, data, colors, resolution } => {
+                VoxelJobMessage::Finished {
+                    generation,
+                    index,
+                    data,
+                    colors,
+                    resolution,
+                    dim_x,
+                    dim_y,
+                    dim_z,
+                } => {
                     if generation != self.voxel_generation || self.cancel_requested {
                         continue;
                     }
@@ -242,6 +289,9 @@ impl VoxelManager {
                         self.voxel_pending[index] = false;
                         if index < self.grid_resolutions.len() {
                             self.grid_resolutions[index] = resolution;
+                        }
+                        if index < self.grid_dims.len() {
+                            self.grid_dims[index] = (dim_x, dim_y, dim_z);
                         }
                         // NOTE: For .vox models, palette slice isn't yet copied into palette buffer.
                         // palette slice (if any) applied separately via PaletteSlice message
@@ -290,12 +340,16 @@ impl VoxelManager {
                 for (i, _view) in ready.iter().enumerate() {
                     let res =
                         self.grid_resolutions.get(i).copied().unwrap_or(self.voxel_resolution);
+                    let (dx, dy, dz) = self.grid_dims.get(i).copied().unwrap_or((res, res, res));
                     infos.push(GridInfo {
                         resolution: res,
                         origin_x: cursor,
-                        ..Default::default()
+                        dim_x: dx,
+                        dim_y: dy,
+                        dim_z: dz,
+                        _pad0: 0,
                     });
-                    cursor += res as f32 * 1.25; // size + 25% spacing
+                    cursor += res as f32 * 1.25; // spacing based on storage size; could switch to dx
                 }
                 let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &infos);
                 self.voxel_set = build_voxel_descriptor_set(
@@ -361,8 +415,14 @@ impl VoxelManager {
         for p in &mut self.voxel_progress {
             *p = (0, 0);
         }
-        let gi =
-            [GridInfo { resolution: self.voxel_resolution, origin_x: 0.0, ..Default::default() }];
+        let gi = [GridInfo {
+            resolution: self.voxel_resolution,
+            origin_x: 0.0,
+            dim_x: self.voxel_resolution,
+            dim_y: self.voxel_resolution,
+            dim_z: self.voxel_resolution,
+            _pad0: 0,
+        }];
         let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
         self.voxel_set = build_voxel_descriptor_set(
             descriptor_set_allocator.clone(),
@@ -430,6 +490,9 @@ impl VoxelManager {
                                 data: vox,
                                 colors,
                                 resolution: result.used_resolution,
+                                dim_x: result.dim_x,
+                                dim_y: result.dim_y,
+                                dim_z: result.dim_z,
                             });
                             if !palette_slice.is_empty() {
                                 let _ = txc.send(VoxelJobMessage::PaletteSlice {
@@ -457,6 +520,9 @@ impl VoxelManager {
                                 data: vox,
                                 colors,
                                 resolution: res_for_grid,
+                                dim_x: res_for_grid,
+                                dim_y: res_for_grid,
+                                dim_z: res_for_grid,
                             });
                         } else {
                             let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
