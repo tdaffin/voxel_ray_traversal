@@ -20,9 +20,33 @@ pub struct PushConstantsInput<'a> {
 }
 
 pub fn build_push_constants(input: PushConstantsInput) -> PushConstants {
-    let size = input.voxel.voxel_resolution as f64;
-    let mut scale_and_center = Matrix4::from_diagonal(&Vector4::from_element(size));
-    scale_and_center.set_column(3, &Vector3::from_element(0.5 * size).push(1.0));
+    // Derive scene AABB from grid origins + dims (x extent only currently; y,z start at 0)
+    let mut max_x = 0.0f64;
+    let mut max_y = 0.0f64;
+    let mut max_z = 0.0f64;
+    for (i, (dx, dy, dz)) in input.voxel.grid_dims.iter().enumerate() {
+        // origin_x stored in grid infos built on GPU side; we recompute here with same logic:
+        // replicate packing logic: accumulate dim_x * 1.25 up to index i
+        let mut origin_x = 0.0f64;
+        let mut cursor = 0.0f64;
+        for j in 0..i {
+            let (pdx, _pdy, _pdz) = input.voxel.grid_dims[j];
+            cursor += pdx as f64 * 1.25;
+        }
+        origin_x = cursor;
+        max_x = max_x.max(origin_x + *dx as f64);
+        max_y = max_y.max(*dy as f64);
+        max_z = max_z.max(*dz as f64);
+    }
+    if max_x <= 0.0 || max_y <= 0.0 || max_z <= 0.0 {
+        let size = input.voxel.voxel_resolution as f64;
+        max_x = size;
+        max_y = size;
+        max_z = size;
+    }
+    let size_vec = Vector4::new(max_x, max_y, max_z, 1.0);
+    let mut scale_and_center = Matrix4::from_diagonal(&size_vec);
+    scale_and_center.set_column(3, &Vector3::new(0.5 * max_x, 0.5 * max_y, 0.5 * max_z).push(1.0));
     let pixel_to_ray = scale_and_center * input.cam_pixel_to_ray;
 
     let voxel_count = input.voxel.active_voxel_grids.max(1); // no fixed cap now
