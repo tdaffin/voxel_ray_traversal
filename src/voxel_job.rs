@@ -334,9 +334,12 @@ impl VoxelManager {
             }
             self.active_voxel_grids = ready.len() as u32;
             if self.active_voxel_grids > 0 {
-                // Build grid info array with precomputed origins (spacing 25% of each grid size)
+                // Build grid info array with precomputed origins.
+                // Use actual content width (dim_x) for spacing instead of padded storage resolution.
                 let mut infos: Vec<GridInfo> = Vec::new();
                 let mut cursor = 0.0f32;
+                let mut row_y = 0.0f32; // future: pack in 2D; currently y always 0
+                let max_row_width = 10_000.0; // large sentinel; later could derive from camera framing
                 for (i, _view) in ready.iter().enumerate() {
                     let res =
                         self.grid_resolutions.get(i).copied().unwrap_or(self.voxel_resolution);
@@ -349,7 +352,13 @@ impl VoxelManager {
                         dim_z: dz,
                         _pad0: 0,
                     });
-                    cursor += res as f32 * 1.25; // spacing based on storage size; could switch to dx
+                    // Advance by actual width plus 25% padding of that width
+                    cursor += dx as f32 * 1.25;
+                    // (Optional) simple wrap if very large line; not currently expected to trigger.
+                    if cursor > max_row_width {
+                        row_y += 0.0; // placeholder for future vertical layout
+                        cursor = 0.0;
+                    }
                 }
                 let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &infos);
                 self.voxel_set = build_voxel_descriptor_set(
