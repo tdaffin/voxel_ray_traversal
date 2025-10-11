@@ -84,14 +84,14 @@ pub fn create_voxel_image_view(
     command_buffer_allocator: Arc<
         vulkano::command_buffer::allocator::StandardCommandBufferAllocator,
     >,
-    queue: Arc<Queue>, voxels: Vec<u128>, resolution: u32,
+    queue: Arc<Queue>, voxels: Vec<u128>, storage_w: u32, storage_h: u32, storage_d: u32,
 ) -> Arc<ImageView> {
     let image = Image::new(
         memory_allocator.clone(),
         ImageCreateInfo {
             image_type: ImageType::Dim3d,
             format: vulkano::format::Format::R32G32B32A32_UINT,
-            extent: [resolution / 4, resolution / 4, resolution / 8],
+            extent: [storage_w, storage_h, storage_d],
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_DST,
             ..Default::default()
         },
@@ -209,10 +209,18 @@ pub fn create_empty_voxel_placeholder(
     >,
     queue: Arc<Queue>, resolution: u32,
 ) -> Arc<ImageView> {
-    // Correct number of packed texels (resolution^3 / 128) all zeroed.
+    // Placeholder uses legacy cubic layout until real data arrives.
     let voxel_texel_count = (resolution as usize).pow(3) / 128;
     let zeros = vec![0u128; voxel_texel_count.max(1)];
-    create_voxel_image_view(memory_allocator, command_buffer_allocator, queue, zeros, resolution)
+    create_voxel_image_view(
+        memory_allocator,
+        command_buffer_allocator,
+        queue,
+        zeros,
+        resolution / 4,
+        resolution / 4,
+        resolution / 8,
+    )
 }
 
 /// Create an empty placeholder color index 3D image (R8_UINT) matching full resolution.

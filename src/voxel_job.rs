@@ -35,6 +35,9 @@ pub enum VoxelJobMessage {
         dim_x: u32,
         dim_y: u32,
         dim_z: u32,
+        storage_w: u32,
+        storage_h: u32,
+        storage_d: u32,
     },
     PaletteSlice {
         generation: u64,
@@ -149,13 +152,14 @@ impl VoxelManager {
             // Each model gets a contiguous 16-color sub-range (low nibble variation added during voxel write).
             thread::spawn(move || {
                 let palette_span = (256 / model_count as u32) as u8; // subrange reserved per model
-                let (vox, colors, palette_opt, native_res_opt, dims_opt) =
+                let (vox, colors, palette_opt, native_res_opt, dims_opt, storage_opt) =
                     if path.extension().and_then(|e| e.to_str()) == Some("vox") {
                         if !path.exists() {
                             eprintln!("[voxel] .vox file missing: {}", path.display());
                             (
                                 vec![0u128; (res as usize).pow(3) / 128],
                                 vec![0u8; (res as usize).pow(3)],
+                                None,
                                 None,
                                 None,
                                 None,
@@ -171,13 +175,15 @@ impl VoxelManager {
                             let p = result.palette;
                             let used_res = result.used_resolution;
                             let dims_tuple = (result.dim_x, result.dim_y, result.dim_z);
+                            // Currently .vox path still uses cubic packed storage; derive for now
+                            let storage_tuple = (used_res / 4, used_res / 4, used_res / 8);
                             if v.iter().all(|&u| u == 0) {
                                 eprintln!(
                                     "[voxel] WARNING: .vox produced empty voxel set: {}",
                                     path.display()
                                 );
                             }
-                            (v, c, Some(p), Some(used_res), Some(dims_tuple))
+                            (v, c, Some(p), Some(used_res), Some(dims_tuple), Some(storage_tuple))
                         } else {
                             eprintln!("[voxel] Failed to parse .vox file: {}", path.display());
                             (
@@ -186,14 +192,18 @@ impl VoxelManager {
                                 None,
                                 None,
                                 None,
+                                None,
                             )
                         }
                     } else {
-                        let (v, c) = voxelize::ply_to_voxels(&path, res, base_palette_index);
-                        (v, c, None, Some(res), Some((res, res, res)))
+                        let (v, c, logical, storage) =
+                            voxelize::ply_to_voxels(&path, res, base_palette_index);
+                        (v, c, None, Some(res), Some(logical), Some(storage))
                     };
                 let used_res = native_res_opt.unwrap_or(res);
                 let (dx, dy, dz) = dims_opt.unwrap_or((used_res, used_res, used_res));
+                let (sw, sh, sd) =
+                    storage_opt.unwrap_or((used_res / 4, used_res / 4, used_res / 8));
                 let _ = txc.send(VoxelJobMessage::Finished {
                     generation: generation_id,
                     index: idx,
@@ -203,6 +213,9 @@ impl VoxelManager {
                     dim_x: dx,
                     dim_y: dy,
                     dim_z: dz,
+                    storage_w: sw,
+                    storage_h: sh,
+                    storage_d: sd,
                 });
                 // transmit palette slice for .vox models so we can blend custom palette
                 if let Some(pslice) = palette_opt {
@@ -267,6 +280,9 @@ impl VoxelManager {
                     dim_x,
                     dim_y,
                     dim_z,
+                    storage_w,
+                    storage_h,
+                    storage_d,
                 } => {
                     if generation != self.voxel_generation || self.cancel_requested {
                         continue;
@@ -277,7 +293,9 @@ impl VoxelManager {
                             command_buffer_allocator.clone(),
                             queue.clone(),
                             data,
-                            resolution,
+                            storage_w,
+                            storage_h,
+                            storage_d,
                         );
                         self.voxel_views[index] = Some(view);
                         // Create color index image view
@@ -291,7 +309,7 @@ impl VoxelManager {
                         self.color_index_views[index] = Some(cview);
                         self.voxel_pending[index] = false;
                         if index < self.grid_resolutions.len() {
-                            self.grid_resolutions[index] = resolution;
+                            self.grid_resolutions[index] = resolution; // keep logical base resolution for now
                         }
                         if index < self.grid_dims.len() {
                             self.grid_dims[index] = (dim_x, dim_y, dim_z);
@@ -358,12 +376,11 @@ impl VoxelManager {
                 let target_row_width = (total_area.sqrt() as f32).max(1.0);
                 let mut infos: Vec<GridInfo> = vec![GridInfo::default(); dims_ready.len()];
                 let mut row_y = 0.0f32;
-                let mut row_height = 0.0f32;
                 let mut cursor = 0.0f32;
                 let mut current_row: Vec<(usize, u32, u32, u32, u32)> = Vec::new();
-                let mut place_row = |row: &Vec<(usize, u32, u32, u32, u32)>,
-                                     base_y: f32,
-                                     infos: &mut [GridInfo]| {
+                let place_row = |row: &Vec<(usize, u32, u32, u32, u32)>,
+                                 base_y: f32,
+                                 infos: &mut [GridInfo]| {
                     let mut x = 0.0f32;
                     let mut max_h = 0.0f32;
                     for &(orig_index, res, dx, dy, dz) in row.iter() {
@@ -399,7 +416,7 @@ impl VoxelManager {
                         let used_h = place_row(&current_row, row_y, &mut infos);
                         row_y += used_h;
                         current_row.clear();
-                        cursor = 0.0;
+                        // cursor reset not needed; will be set below for first element of new row
                     }
                     cursor = if current_row.is_empty() {
                         dx as f32 * (1.0 + PADDING)
@@ -556,6 +573,9 @@ impl VoxelManager {
                                 dim_x: result.dim_x,
                                 dim_y: result.dim_y,
                                 dim_z: result.dim_z,
+                                storage_w: result.used_resolution / 4,
+                                storage_h: result.used_resolution / 4,
+                                storage_d: result.used_resolution / 8,
                             });
                             if !palette_slice.is_empty() {
                                 let _ = txc.send(VoxelJobMessage::PaletteSlice {
@@ -570,7 +590,7 @@ impl VoxelManager {
                         let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
                     }
                 } else {
-                    if let Some((vox, colors)) = ply_to_voxels_with_progress(
+                    if let Some((vox, colors, _logical, _storage)) = ply_to_voxels_with_progress(
                         &path,
                         res_for_grid,
                         base_palette_index,
@@ -586,6 +606,9 @@ impl VoxelManager {
                                 dim_x: res_for_grid,
                                 dim_y: res_for_grid,
                                 dim_z: res_for_grid,
+                                storage_w: res_for_grid / 4,
+                                storage_h: res_for_grid / 4,
+                                storage_d: res_for_grid / 8,
                             });
                         } else {
                             let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });

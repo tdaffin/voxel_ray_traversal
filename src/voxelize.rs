@@ -21,7 +21,7 @@ pub struct VoxelProgressCallbacks<'a> {
 
 pub fn ply_to_voxels_with_progress(
     path: impl AsRef<Path>, resolution: u32, base_palette_index: u8, cb: VoxelProgressCallbacks,
-) -> Option<(Vec<u128>, Vec<u8>)> {
+) -> Option<(Vec<u128>, Vec<u8>, (u32, u32, u32), (u32, u32, u32))> {
     let mut mesh = parse_ply(path);
     if cb.cancelled.load(Ordering::Relaxed) {
         return None;
@@ -30,17 +30,17 @@ pub fn ply_to_voxels_with_progress(
     if cb.cancelled.load(Ordering::Relaxed) {
         return None;
     }
-    let (voxels, color_indices) =
+    let (voxels, color_indices, logical_dims, storage_dims) =
         voxelize_mesh_progress(&mesh, resolution, base_palette_index, &cb);
     if cb.cancelled.load(Ordering::Relaxed) {
         return None;
     }
-    Some((voxels, color_indices))
+    Some((voxels, color_indices, logical_dims, storage_dims))
 }
 
 pub fn ply_to_voxels(
     path: impl AsRef<Path>, resolution: u32, base_palette_index: u8,
-) -> (Vec<u128>, Vec<u8>) {
+) -> (Vec<u128>, Vec<u8>, (u32, u32, u32), (u32, u32, u32)) {
     ply_to_voxels_with_progress(
         path,
         resolution,
@@ -148,11 +148,19 @@ fn transform_vertices(vertices: &mut [Vec3], resolution: u32) {
 
 fn voxelize_mesh_progress(
     mesh: &Mesh, resolution: u32, base_palette_index: u8, cb: &VoxelProgressCallbacks,
-) -> (Vec<u128>, Vec<u8>) {
-    let resolution = resolution as usize;
-    let mut voxels = vec![0u128; resolution * resolution * resolution / 128];
-    // One color index byte per voxel (Option C); simple procedural assignment now.
-    let mut color_indices = vec![0u8; resolution * resolution * resolution];
+) -> (Vec<u128>, Vec<u8>, (u32, u32, u32), (u32, u32, u32)) {
+    // For non-cubic storage we preserve logical dims (resolution^3 target still uniform for ply)
+    // but future per-axis scaling could set these independently. Keep interface flexible.
+    let dx = resolution;
+    let dy = resolution;
+    let dz = resolution;
+    // Packed texel extents (4x4x8 voxels per texel)
+    let storage_w = (dx + 3) / 4; // ceil div
+    let storage_h = (dy + 3) / 4;
+    let storage_d = (dz + 7) / 8;
+    let packed_texel_count = (storage_w * storage_h * storage_d) as usize;
+    let mut voxels = vec![0u128; packed_texel_count];
+    let mut color_indices = vec![0u8; (dx * dy * dz) as usize];
     let total = mesh.triangles.len();
     let mut processed = 0usize;
     for triangle in &mesh.triangles {
@@ -164,13 +172,20 @@ fn voxelize_mesh_progress(
         let c = &mesh.vertices[triangle[2] as usize];
         let helper = Helper::new(a, b, c);
         helper.visit_intersecting_voxels(|x, y, z| {
-            let texel = (x + ((y + (z / 8) * resolution) / 4) * resolution) / 4;
+            if x >= dx as usize || y >= dy as usize || z >= dz as usize {
+                return;
+            }
+            // Flatten into packed texel index using storage extents
+            let tx = x / 4;
+            let ty = y / 4;
+            let tz = z / 8;
+            let texel = (tx + (ty + tz * storage_h as usize) * storage_w as usize) as usize;
             let bit = (x % 4) * 32 + (y % 4) + (z % 8) * 4;
-            voxels[texel] |= 1 << bit;
+            voxels[texel] |= 1u128 << bit;
             // Procedural palette index: gradient based on z (0..255 wrap)
             // Assign index as base + small variation by z to avoid flat color per model
             let idx = base_palette_index.wrapping_add((z as u8) & 0x0F);
-            color_indices[(z * resolution + y) * resolution + x] = idx;
+            color_indices[(z * dy as usize + y) * dx as usize + x] = idx;
         });
         processed += 1;
         if processed % 256 == 0 {
@@ -183,7 +198,7 @@ fn voxelize_mesh_progress(
     if let Some(p) = &cb.progress {
         p(processed, total);
     }
-    (voxels, color_indices)
+    (voxels, color_indices, (dx, dy, dz), (storage_w, storage_h, storage_d))
 }
 
 struct Helper {
