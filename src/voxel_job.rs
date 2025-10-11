@@ -38,6 +38,8 @@ pub enum VoxelJobMessage {
         storage_w: u32,
         storage_h: u32,
         storage_d: u32,
+        palette_base: u32,
+        palette_len: u32,
     },
     PaletteSlice {
         generation: u64,
@@ -139,6 +141,8 @@ impl VoxelManager {
             storage_w: initial_resolution / 4,
             storage_h: initial_resolution / 4,
             storage_d: initial_resolution / 8,
+            palette_base: 0,
+            palette_len: 256,
         }];
         let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
         let voxel_set = build_voxel_descriptor_set(
@@ -222,6 +226,8 @@ impl VoxelManager {
                     storage_w: sw,
                     storage_h: sh,
                     storage_d: sd,
+                    palette_base: 0,
+                    palette_len: 256,
                 });
                 // transmit palette slice for .vox models so we can blend custom palette
                 if let Some(pslice) = palette_opt {
@@ -290,6 +296,8 @@ impl VoxelManager {
                     storage_w,
                     storage_h,
                     storage_d,
+                    palette_base,
+                    palette_len,
                 } => {
                     if generation != self.voxel_generation || self.cancel_requested {
                         continue;
@@ -328,6 +336,7 @@ impl VoxelManager {
                         }
                         // NOTE: For .vox models, palette slice isn't yet copied into palette buffer.
                         // palette slice (if any) applied separately via PaletteSlice message
+                        // TODO Step8: store per-grid palette_base/len in parallel vectors, update later
                     }
                 }
                 VoxelJobMessage::PaletteSlice { generation, base, colors } => {
@@ -411,6 +420,8 @@ impl VoxelManager {
                             storage_w,
                             storage_h,
                             storage_d,
+                            palette_base: 0,
+                            palette_len: 256,
                         };
                         x += dx as f32 * (1.0 + PADDING);
                         max_h = max_h.max(dy as f32 * (1.0 + PADDING));
@@ -516,6 +527,8 @@ impl VoxelManager {
             storage_w: self.voxel_resolution / 4,
             storage_h: self.voxel_resolution / 4,
             storage_d: self.voxel_resolution / 8,
+            palette_base: 0,
+            palette_len: 256,
         }];
         let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
         self.voxel_set = build_voxel_descriptor_set(
@@ -590,6 +603,8 @@ impl VoxelManager {
                                 storage_w: result.storage_w,
                                 storage_h: result.storage_h,
                                 storage_d: result.storage_d,
+                                palette_base: 0,
+                                palette_len: palette_slice.len() as u32,
                             });
                             if !palette_slice.is_empty() {
                                 let _ = txc.send(VoxelJobMessage::PaletteSlice {
@@ -623,6 +638,8 @@ impl VoxelManager {
                                 storage_w: res_for_grid / 4,
                                 storage_h: res_for_grid / 4,
                                 storage_d: res_for_grid / 8,
+                                palette_base: 0,
+                                palette_len: 16, // PLY procedural palette currently 16-shade gradient
                             });
                         } else {
                             let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });

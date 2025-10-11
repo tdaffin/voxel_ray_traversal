@@ -25,9 +25,11 @@ pub struct GridInfo {
     pub dim_y: u32,
     pub dim_z: u32,
     // New: storage extents (packed texture actual allocated dimensions). For now mirror cubic; will diverge when non-cubic storage enabled.
-    pub storage_w: u32, // packed voxel texel width (resolution/4 currently)
-    pub storage_h: u32, // packed voxel texel height (resolution/4 currently)
-    pub storage_d: u32, // packed voxel texel depth (resolution/8 currently)
+    pub storage_w: u32,    // packed voxel texel width (resolution/4 currently)
+    pub storage_h: u32,    // packed voxel texel height (resolution/4 currently)
+    pub storage_d: u32,    // packed voxel texel depth (resolution/8 currently)
+    pub palette_base: u32, // starting index into global palette buffer
+    pub palette_len: u32,  // number of valid palette entries for this grid
 }
 
 pub fn create_grid_info_buffer(

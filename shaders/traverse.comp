@@ -41,6 +41,8 @@ struct GridInfo {
     uint storageW;   // packed texel width (currently resolution/4)
     uint storageH;   // packed texel height (currently resolution/4)
     uint storageD;   // packed texel depth (currently resolution/8)
+    uint paletteBase; // starting index into palette buffer
+    uint paletteLen;  // number of valid entries for this grid
 };
 layout(set = 1, binding = 3) readonly buffer GridInfoBuffer { GridInfo gridInfos[]; };
 
@@ -202,8 +204,12 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, out vec3 color,
             // - AO considers orthogonal neighbor occupancy around the stepped neighbor cell.
             // - Uses the traversed normal derived above (same as NORMAL case logic) and mixes with a simple depth term.
             {
-                // Fetch palette index (0-255) for this voxel; grayscale procedural palette for now.
-                uint palette_idx = imageLoad(voxelColorIndices[gridIndex], ivec3(coord)).r;
+                // Fetch local palette index for this voxel; convert to global via grid's paletteBase/Len.
+                uint local_idx = imageLoad(voxelColorIndices[gridIndex], ivec3(coord)).r;
+                uint base = gridInfos[gridIndex].paletteBase;
+                uint plen = gridInfos[gridIndex].paletteLen;
+                uint clamped = (plen == 0) ? 0 : min(local_idx, plen - 1);
+                uint palette_idx = base + clamped;
                 vec3 voxel_base_color = vec3(1.0);
                 if (palette_idx < palette.length()) {
                     voxel_base_color = palette[palette_idx].rgb;
