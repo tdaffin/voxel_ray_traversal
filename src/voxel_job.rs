@@ -82,6 +82,13 @@ pub struct VoxelManager {
     voxel_generation: u64,
     cancel_requested: bool,
     voxel_cancel_flag: Arc<AtomicBool>,
+    // Octree data
+    pub octree_nodes: Vec<Option<Vec<crate::octree::OctNode>>>,
+    pub octree_max_depths: Vec<u32>,
+    pub octree_node_buffer: Option<Subbuffer<[crate::octree::OctNode]>>,
+    pub octree_grid_info_buffer: Option<Subbuffer<[crate::octree::OctreeGridInfo]>>,
+    placeholder_octree_node_buffer: Subbuffer<[crate::octree::OctNode]>,
+    placeholder_octree_grid_info_buffer: Subbuffer<[crate::octree::OctreeGridInfo]>,
 }
 
 impl VoxelManager {
@@ -132,6 +139,32 @@ impl VoxelManager {
         }
         let palette_buffer =
             crate::voxel::create_palette_buffer(memory_allocator.clone(), &palette);
+        // Placeholder octree buffers (single dummy entries)
+        use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+        use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
+        let usage = BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST;
+        let placeholder_octree_node_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo { usage, ..Default::default() },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            [crate::octree::OctNode::default()].into_iter(),
+        )
+        .expect("placeholder octree node buffer");
+        let placeholder_octree_grid_info_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo { usage, ..Default::default() },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            [crate::octree::OctreeGridInfo::default()].into_iter(),
+        )
+        .expect("placeholder octree grid info buffer");
         // Initial grid info (single placeholder)
         let gi = [GridInfo {
             resolution: initial_resolution,
@@ -154,6 +187,8 @@ impl VoxelManager {
             std::slice::from_ref(&placeholder_color_view),
             palette_buffer.clone(),
             grid_info_buffer.clone(),
+            placeholder_octree_node_buffer.clone(),
+            placeholder_octree_grid_info_buffer.clone(),
         );
         let (tx, rx) = mpsc::channel();
         let voxel_generation = 1u64;
@@ -276,6 +311,12 @@ impl VoxelManager {
             voxel_generation,
             cancel_requested: false,
             voxel_cancel_flag,
+            octree_nodes: vec![None; model_count],
+            octree_max_depths: vec![0; model_count],
+            octree_node_buffer: None,
+            octree_grid_info_buffer: None,
+            placeholder_octree_node_buffer,
+            placeholder_octree_grid_info_buffer,
         }
     }
 
@@ -311,6 +352,7 @@ impl VoxelManager {
                         continue;
                     }
                     if index < self.voxel_views.len() {
+                        let voxel_data_clone = data.clone(); // clone for octree build
                         let view = create_voxel_image_view(
                             memory_allocator.clone(),
                             command_buffer_allocator.clone(),
@@ -341,6 +383,41 @@ impl VoxelManager {
                         }
                         if index < self.grid_storage.len() {
                             self.grid_storage[index] = (storage_w, storage_h, storage_d);
+                        }
+                        // Build octree (synchronously for now)
+                        let (dimx, dimy, dimz) = (dim_x, dim_y, dim_z);
+                        let blocks_w = storage_w; // number of 4x4x8 blocks in x
+                        let blocks_h = storage_h;
+                        let blocks_d = storage_d;
+                        let get_occ = |x: u32, y: u32, z: u32| -> bool {
+                            if x >= dimx || y >= dimy || z >= dimz {
+                                return false;
+                            }
+                            let block_x = x / 4;
+                            let block_y = y / 4;
+                            let block_z = z / 8;
+                            if block_x >= blocks_w || block_y >= blocks_h || block_z >= blocks_d {
+                                return false;
+                            }
+                            let index_b = (block_z * blocks_h * blocks_w
+                                + block_y * blocks_w
+                                + block_x) as usize;
+                            if index_b >= voxel_data_clone.len() {
+                                return false;
+                            }
+                            let texel = voxel_data_clone[index_b];
+                            let lane = x % 4; // selects u32 within u128
+                            let word = ((texel >> (lane * 32)) & 0xFFFF_FFFF) as u32;
+                            let bit_index = (y % 4) + (z % 8) * 4;
+                            ((word >> bit_index) & 1) != 0
+                        };
+                        let (nodes, max_depth) =
+                            crate::octree::build_octree((dimx, dimy, dimz), get_occ, Some(6));
+                        if index < self.octree_nodes.len() {
+                            self.octree_nodes[index] = Some(nodes);
+                        }
+                        if index < self.octree_max_depths.len() {
+                            self.octree_max_depths[index] = max_depth;
                         }
                         // NOTE: For .vox models, palette slice isn't yet copied into palette buffer.
                         // palette slice (if any) applied separately via PaletteSlice message
@@ -481,6 +558,65 @@ impl VoxelManager {
                     }
                 }
                 let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &infos);
+                // Build or update octree buffers if all_ready and octrees exist for grids; concatenate per-grid nodes.
+                if all_ready {
+                    let mut concatenated: Vec<crate::octree::OctNode> = Vec::new();
+                    let mut oct_infos: Vec<crate::octree::OctreeGridInfo> = Vec::new();
+                    for (i, _gi) in infos.iter().enumerate() {
+                        if let Some(onodes) = self.octree_nodes.get(i).and_then(|o| o.as_ref()) {
+                            let offset = concatenated.len() as u32;
+                            concatenated.extend_from_slice(onodes);
+                            oct_infos.push(crate::octree::OctreeGridInfo {
+                                node_offset: offset,
+                                node_count: onodes.len() as u32,
+                                max_depth: self.octree_max_depths.get(i).copied().unwrap_or(0),
+                                flags: 1,
+                            });
+                        } else {
+                            oct_infos.push(crate::octree::OctreeGridInfo {
+                                node_offset: 0,
+                                node_count: 0,
+                                max_depth: 0,
+                                flags: 0,
+                            });
+                        }
+                    }
+                    if concatenated.is_empty() {
+                        concatenated.push(Default::default());
+                    }
+                    if oct_infos.is_empty() {
+                        oct_infos.push(Default::default());
+                    }
+                    use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+                    use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
+                    let usage = BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST;
+                    self.octree_node_buffer = Some(
+                        Buffer::from_iter(
+                            memory_allocator.clone(),
+                            BufferCreateInfo { usage, ..Default::default() },
+                            AllocationCreateInfo {
+                                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                                ..Default::default()
+                            },
+                            concatenated.into_iter(),
+                        )
+                        .expect("octree node buffer"),
+                    );
+                    self.octree_grid_info_buffer = Some(
+                        Buffer::from_iter(
+                            memory_allocator.clone(),
+                            BufferCreateInfo { usage, ..Default::default() },
+                            AllocationCreateInfo {
+                                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                                ..Default::default()
+                            },
+                            oct_infos.into_iter(),
+                        )
+                        .expect("octree grid info buffer"),
+                    );
+                }
                 self.voxel_set = build_voxel_descriptor_set(
                     descriptor_set_allocator.clone(),
                     render_pipeline,
@@ -488,6 +624,12 @@ impl VoxelManager {
                     &ready_colors,
                     self.palette_buffer.clone(),
                     grid_info_buffer,
+                    self.octree_node_buffer
+                        .clone()
+                        .unwrap_or(self.placeholder_octree_node_buffer.clone()),
+                    self.octree_grid_info_buffer
+                        .clone()
+                        .unwrap_or(self.placeholder_octree_grid_info_buffer.clone()),
                 );
             }
         }
@@ -570,6 +712,8 @@ impl VoxelManager {
             std::slice::from_ref(&self.placeholder_color_view),
             self.palette_buffer.clone(),
             grid_info_buffer,
+            self.placeholder_octree_node_buffer.clone(),
+            self.placeholder_octree_grid_info_buffer.clone(),
         );
         let (tx, rx) = mpsc::channel();
         self.voxel_result_rx = rx;

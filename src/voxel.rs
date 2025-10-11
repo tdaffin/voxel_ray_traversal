@@ -14,6 +14,8 @@ use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::pipeline::Pipeline; // for layout() method
 use vulkano::pipeline::compute::ComputePipeline;
+// Octree acceleration structures (optional)
+use crate::octree::{OctNode, OctreeGridInfo};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, BufferContents)]
@@ -53,9 +55,14 @@ pub fn create_grid_info_buffer(
 /// The shader must declare matching bindings [0..N-1].
 pub fn build_voxel_descriptor_set(
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-    render_pipeline: &ComputePipeline, image_views: &[Arc<ImageView>],
-    color_index_views: &[Arc<ImageView>], palette_buffer: Subbuffer<[[f32; 4]]>,
+    render_pipeline: &ComputePipeline,
+    image_views: &[Arc<ImageView>],
+    color_index_views: &[Arc<ImageView>],
+    palette_buffer: Subbuffer<[[f32; 4]]>,
     grid_info_buffer: Subbuffer<[GridInfo]>,
+    // Octree buffers (may contain dummy single element; shader uses flags to detect presence)
+    octree_node_buffer: Subbuffer<[OctNode]>,
+    octree_grid_info_buffer: Subbuffer<[OctreeGridInfo]>,
 ) -> Arc<DescriptorSet> {
     assert!(!image_views.is_empty(), "Need at least one voxel image view");
     const MAX_GRIDS: usize = 32; // keep in sync with shader
@@ -70,12 +77,14 @@ pub fn build_voxel_descriptor_set(
     while padded_colors.len() < MAX_GRIDS {
         padded_colors.push(padded_colors[0].clone());
     }
-    let writes = [
-        WriteDescriptorSet::image_view_array(0, 0, padded.iter().cloned()),
-        WriteDescriptorSet::image_view_array(1, 0, padded_colors.iter().cloned()),
-        WriteDescriptorSet::buffer(2, palette_buffer.clone()),
-        WriteDescriptorSet::buffer(3, grid_info_buffer.clone()),
-    ];
+    // Collect writes dynamically to allow optional buffers.
+    let mut writes: Vec<WriteDescriptorSet> = Vec::new();
+    writes.push(WriteDescriptorSet::image_view_array(0, 0, padded.iter().cloned()));
+    writes.push(WriteDescriptorSet::image_view_array(1, 0, padded_colors.iter().cloned()));
+    writes.push(WriteDescriptorSet::buffer(2, palette_buffer.clone()));
+    writes.push(WriteDescriptorSet::buffer(3, grid_info_buffer.clone()));
+    writes.push(WriteDescriptorSet::buffer(4, octree_node_buffer.clone()));
+    writes.push(WriteDescriptorSet::buffer(5, octree_grid_info_buffer.clone()));
     DescriptorSet::new(descriptor_set_allocator, layout, writes, [])
         .expect("Failed to create voxel descriptor set (array)")
 }

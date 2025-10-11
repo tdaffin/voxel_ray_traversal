@@ -11,6 +11,7 @@ mod gpu;
 mod hot_reload;
 mod input_controller;
 mod model_discovery;
+mod octree;
 mod pipelines;
 mod push_constants;
 mod render_mode;

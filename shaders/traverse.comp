@@ -45,6 +45,73 @@ struct GridInfo {
     uint paletteLen;  // number of valid entries for this grid
 };
 layout(set = 1, binding = 3) readonly buffer GridInfoBuffer { GridInfo gridInfos[]; };
+// Octree buffers (optional). Binding 4: node buffer (uvec2 per node: x=first_child (0xFFFFFFFF = leaf), y=mask in low 8 bits)
+layout(set = 1, binding = 4) readonly buffer OctreeNodeBuffer { uvec2 octNodes[]; };
+struct OctreeGridInfo { uint node_offset; uint node_count; uint max_depth; uint flags; };
+layout(set = 1, binding = 5) readonly buffer OctreeGridInfoBuffer { OctreeGridInfo octGridInfos[]; };
+
+// Forward utilities used by octree traversal
+const float FLT_MAX = 3.4028235e+38;
+
+bool readVoxel(uvec3 coord, inout uvec4 texel, inout ivec3 texel_coord, int gridIndex) {
+    ivec3 new_texel_coord = ivec3(coord.x / 4, coord.y / 4, coord.z / 8);
+    if (new_texel_coord != texel_coord) {
+        texel_coord = new_texel_coord;
+        texel = imageLoad(voxelImages[gridIndex], texel_coord);
+    }
+    return bool(texel[coord.x % 4] >> ((coord.y % 4) + (coord.z % 8) * 4) & 1u);
+}
+
+bool octree_available(int gridIndex) {
+    if (gridIndex >= int(pc.voxel_count)) return false;
+    if (octGridInfos.length() == 0) return false;
+    return (octGridInfos[gridIndex].flags & 1u) != 0u && octGridInfos[gridIndex].node_count > 0u;
+}
+
+// Simple stack entry
+struct StackEntry { uint node; uint depth; vec3 minp; vec3 maxp; };
+
+bool traverse_octree(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, out vec3 color, inout uint steps) {
+    if (!octree_available(gridIndex)) return false;
+    OctreeGridInfo gi = octGridInfos[gridIndex];
+    uint base = gi.node_offset;
+    // Root node covers dims aligned to power of two side length = 2^max_depth
+    float size = float(1u << gi.max_depth);
+    StackEntry stack[32]; // limited
+    int sp = 0;
+    stack[sp++] = StackEntry(base, 0u, vec3(0), vec3(size));
+    vec3 bestColor = vec3(0); bool hit=false; float bestT = FLT_MAX; uint bestSteps=steps;
+    while (sp>0) {
+        StackEntry e = stack[--sp];
+        // AABB intersect
+        vec3 invd = 1.0/dir; vec3 t0 = (e.minp - origin)*invd; vec3 t1 = (e.maxp - origin)*invd; vec3 tsm=min(t0,t1); vec3 tbg=max(t0,t1); float tmin=max(0.0,max(tsm.x,max(tsm.y,tsm.z))); float tmax=min(tbg.x,min(tbg.y,tbg.z));
+        if (tmin>tmax || tmin>bestT) continue;
+        steps++;
+        uvec2 raw = octNodes[e.node];
+        uint first_child = raw.x; uint mask = raw.y & 0xFFu;
+        bool leaf = first_child == 0xFFFFffffu;
+        if (leaf) {
+            // Approx color & normal using existing traversal fallback: sample center voxel via dense readVoxel
+            vec3 hitp = origin + dir * tmin;
+            uvec3 coord = uvec3(clamp(floor(hitp), vec3(0), vec3(vec3(dims)-1.0)));
+            // Reuse dense read to fetch real occupancy to avoid false positives (optional)
+            uvec4 texel; ivec3 tc = ivec3(-1); if (!readVoxel(coord, texel, tc, gridIndex)) continue;
+            bestT = tmin; hit=true; bestColor = vec3(coord)/max(vec3(dims)-1.0, vec3(1.0)); bestSteps = steps; break;
+        } else {
+            float childSize = (e.maxp.x - e.minp.x)/2.0;
+            for (int cz=0; cz<2; ++cz) for (int cy=0; cy<2; ++cy) for (int cx=0; cx<2; ++cx) {
+                int childIdx = cx | (cy<<1) | (cz<<2);
+                // optional frustum ordering could be added
+                uint nodeIndex = first_child + uint(childIdx);
+                vec3 cmin = e.minp + vec3(float(cx), float(cy), float(cz))*childSize;
+                vec3 cmax = cmin + vec3(childSize);
+                if (sp < 31) { stack[sp++] = StackEntry(nodeIndex, e.depth+1u, cmin, cmax); }
+            }
+        }
+    }
+    if (hit) { color=bestColor; steps=bestSteps; return true; }
+    return false;
+}
 
 // https://www.shadertoy.com/view/WlfXRN
 vec3 inferno(float t) {
@@ -64,17 +131,7 @@ vec3 stepsToInferno(uint steps, uint start, uint end) {
     return inferno(clamp(t, 0, 1));
 }
 
-bool readVoxel(uvec3 coord, inout uvec4 texel, inout ivec3 texel_coord, int gridIndex) {
-    // Uses per-grid storage block dimensions (4x4x8 voxels per texel) independent of cubic "resolution".
-    ivec3 new_texel_coord = ivec3(coord.x / 4, coord.y / 4, coord.z / 8);
-    if (new_texel_coord != texel_coord) {
-        texel_coord = new_texel_coord;
-        texel = imageLoad(voxelImages[gridIndex], texel_coord);
-    }
-    return bool(texel[coord.x % 4] >> ((coord.y % 4) + (coord.z % 8) * 4) & 1u);
-}
-
-const float FLT_MAX = 3.4028235e+38;
+// (readVoxel and FLT_MAX moved earlier for octree usage)
 
 bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, out vec3 color, inout uint steps) {
     vec3 inv_dir = 1. / dir;
@@ -361,13 +418,21 @@ void main() {
         uvec3 dims = uvec3(gridInfos[gridIdx].dimX, gridInfos[gridIdx].dimY, gridInfos[gridIdx].dimZ);
         vec3 localOrigin = ro - vec3(originsX[gridIdx], originsY[gridIdx], 0);
         uint stepsBefore = steps;
-        if (traversal(gridIdx, localOrigin, rd, dims, color, steps)) {
+        bool used_oct = false;
+        if (octree_available(gridIdx)) {
+            used_oct = traverse_octree(gridIdx, localOrigin, rd, dims, color, steps);
+        }
+        if (!used_oct && traversal(gridIdx, localOrigin, rd, dims, color, steps)) {
             hit = true;
             if (pc.render_mode != STEPS) {
                 imageStore(targetImage, pixelCoord, vec4(color, 1));
             }
             if (pc.render_mode == STEPS)
                 renderSteps(pixelCoord, steps, max(dims.x, max(dims.y, dims.z)));
+        } else if (used_oct) {
+            hit = true;
+            if (pc.render_mode != STEPS) imageStore(targetImage, pixelCoord, vec4(color,1));
+            if (pc.render_mode == STEPS) renderSteps(pixelCoord, steps, max(dims.x, max(dims.y, dims.z)));
         } else {
             // traversal missed inside this grid volume; continue to next grid. steps already accumulated.
         }
