@@ -1,5 +1,5 @@
 use crate::voxel_job::VoxelManager;
-use nalgebra::{Matrix4, Vector3, Vector4};
+use nalgebra::{Matrix4, Vector3};
 
 use vulkano::buffer::BufferContents;
 
@@ -54,10 +54,15 @@ pub fn build_push_constants(input: PushConstantsInput) -> PushConstants {
         max_y = size;
         max_z = size;
     }
-    let size_vec = Vector4::new(max_x, max_y, max_z, 1.0);
-    let mut scale_and_center = Matrix4::from_diagonal(&size_vec);
-    scale_and_center.set_column(3, &Vector3::new(0.5 * max_x, 0.5 * max_y, 0.5 * max_z).push(1.0));
-    let pixel_to_ray = scale_and_center * input.cam_pixel_to_ray;
+    // Uniform scale to largest dimension to avoid anisotropic distortion.
+    let largest = max_x.max(max_y).max(max_z).max(1.0);
+    let mut scale_and_center64 = Matrix4::<f64>::identity();
+    scale_and_center64[(0, 0)] = largest;
+    scale_and_center64[(1, 1)] = largest;
+    scale_and_center64[(2, 2)] = largest;
+    scale_and_center64
+        .set_column(3, &Vector3::new(0.5 * largest, 0.5 * largest, 0.5 * largest).push(1.0));
+    let pixel_to_ray = scale_and_center64 * input.cam_pixel_to_ray;
 
     let voxel_count = input.voxel.active_voxel_grids.max(1); // no fixed cap now
 

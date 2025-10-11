@@ -337,32 +337,72 @@ impl VoxelManager {
             if self.active_voxel_grids > 0 {
                 // Build grid info array with precomputed origins.
                 // Use actual content width (dim_x) for spacing instead of padded storage resolution.
-                let mut infos: Vec<GridInfo> = Vec::new();
-                let mut cursor = 0.0f32;
-                let mut row_y = 0.0f32; // 2D packing vertical offset accumulator
+                // Refined heuristic:
+                // 1. Compute approximate total area (dx*dy) and target row width ~= sqrt(total_area) * k
+                // 2. Greedy pack grids into rows until adding next would exceed target, then wrap.
+                // 3. Within a row, lay out left-to-right with padding factor P.
+                const PADDING: f32 = 0.10; // 10% spacing (reduced from 25%)
+                let mut dims_ready: Vec<(usize, u32, u32, u32, u32)> = Vec::new();
+                let mut total_area: f64 = 0.0;
                 for (i, _view) in ready.iter().enumerate() {
                     let res =
                         self.grid_resolutions.get(i).copied().unwrap_or(self.voxel_resolution);
                     let (dx, dy, dz) = self.grid_dims.get(i).copied().unwrap_or((res, res, res));
-                    infos.push(GridInfo {
-                        resolution: res,
-                        origin_x: cursor,
-                        origin_y: row_y,
-                        dim_x: dx,
-                        dim_y: dy,
-                        dim_z: dz,
-                        _pad0: 0,
-                    });
-                    // Advance by actual width plus 25% padding of that width
-                    cursor += dx as f32 * 1.25;
-                    let row_height = dy as f32 * 1.25;
-                    // Simple heuristic: wrap when current row width exceeds 1.5 * average width so far or large sentinel
-                    // For now use a target aspect: if cursor > (max_y_so_far * 2.0) not available here, approximate by threshold.
-                    if cursor > 512.0 {
-                        // TODO: dynamic threshold (e.g., sqrt(total area))
-                        row_y += row_height;
+                    total_area += (dx.max(1) * dy.max(1)) as f64;
+                    dims_ready.push((i, res, dx, dy, dz));
+                }
+                // Sort by descending height to improve packing (tallest-first skyline approximation)
+                dims_ready.sort_by_key(|&(_, _, _dx, dy, _)| std::cmp::Reverse(dy));
+                let target_row_width = (total_area.sqrt() as f32).max(1.0);
+                let mut infos: Vec<GridInfo> = vec![GridInfo::default(); dims_ready.len()];
+                let mut row_y = 0.0f32;
+                let mut row_height = 0.0f32;
+                let mut cursor = 0.0f32;
+                let mut current_row: Vec<(usize, u32, u32, u32, u32)> = Vec::new();
+                let mut place_row = |row: &Vec<(usize, u32, u32, u32, u32)>,
+                                     base_y: f32,
+                                     infos: &mut [GridInfo]| {
+                    let mut x = 0.0f32;
+                    let mut max_h = 0.0f32;
+                    for &(orig_index, res, dx, dy, dz) in row.iter() {
+                        infos[orig_index] = GridInfo {
+                            resolution: res,
+                            origin_x: x,
+                            origin_y: base_y,
+                            dim_x: dx,
+                            dim_y: dy,
+                            dim_z: dz,
+                            _pad0: 0,
+                        };
+                        x += dx as f32 * (1.0 + PADDING);
+                        max_h = max_h.max(dy as f32 * (1.0 + PADDING));
+                    }
+                    max_h
+                };
+                for entry in dims_ready.into_iter() {
+                    let (_, _res, dx, _dy, _dz) = entry;
+                    let projected = if current_row.is_empty() {
+                        dx as f32
+                    } else {
+                        cursor + dx as f32 * (1.0 + PADDING)
+                    };
+                    if !current_row.is_empty() && projected > target_row_width * 1.25 {
+                        // allow some slack
+                        // flush row
+                        let used_h = place_row(&current_row, row_y, &mut infos);
+                        row_y += used_h;
+                        current_row.clear();
                         cursor = 0.0;
                     }
+                    cursor = if current_row.is_empty() {
+                        dx as f32 * (1.0 + PADDING)
+                    } else {
+                        projected
+                    };
+                    current_row.push(entry);
+                }
+                if !current_row.is_empty() {
+                    let _ = place_row(&current_row, row_y, &mut infos);
                 }
                 let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &infos);
                 self.voxel_set = build_voxel_descriptor_set(
