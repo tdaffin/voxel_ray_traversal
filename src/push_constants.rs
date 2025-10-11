@@ -24,20 +24,30 @@ pub fn build_push_constants(input: PushConstantsInput) -> PushConstants {
     let mut max_x = 0.0f64;
     let mut max_y = 0.0f64;
     let mut max_z = 0.0f64;
-    for (i, (dx, dy, dz)) in input.voxel.grid_dims.iter().enumerate() {
-        // origin_x stored in grid infos built on GPU side; we recompute here with same logic:
-        // replicate packing logic: accumulate dim_x * 1.25 up to index i
-        let mut origin_x = 0.0f64;
-        let mut cursor = 0.0f64;
-        for j in 0..i {
-            let (pdx, _pdy, _pdz) = input.voxel.grid_dims[j];
-            cursor += pdx as f64 * 1.25;
+    // Reconstruct 2D packing (must match voxel_job.rs packing heuristic):
+    let mut cursor = 0.0f64;
+    let mut row_y = 0.0f64;
+    let mut row_max_height = 0.0f64;
+    for (dx, dy, dz) in input.voxel.grid_dims.iter() {
+        // If adding this would exceed threshold, wrap to next row.
+        if cursor > 0.0 && cursor + (*dx as f64 * 1.25) > 512.0 {
+            // threshold mirrors job.rs
+            // finalize previous row
+            max_x = max_x.max(cursor);
+            row_y += row_max_height;
+            cursor = 0.0;
+            row_max_height = 0.0;
         }
-        origin_x = cursor;
+        let origin_x = cursor;
+        let origin_y = row_y;
         max_x = max_x.max(origin_x + *dx as f64);
-        max_y = max_y.max(*dy as f64);
+        max_y = max_y.max(origin_y + *dy as f64);
         max_z = max_z.max(*dz as f64);
+        cursor += *dx as f64 * 1.25;
+        row_max_height = row_max_height.max(*dy as f64 * 1.25);
     }
+    // account last row
+    max_x = max_x.max(cursor);
     if max_x <= 0.0 || max_y <= 0.0 || max_z <= 0.0 {
         let size = input.voxel.voxel_resolution as f64;
         max_x = size;

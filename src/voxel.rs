@@ -20,7 +20,8 @@ use vulkano::pipeline::compute::ComputePipeline;
 pub struct GridInfo {
     pub resolution: u32, // cubic storage resolution (power-of-two-ish padded)
     pub origin_x: f32,
-    pub dim_x: u32, // actual content dimensions (<= resolution)
+    pub origin_y: f32, // new: 2D packing vertical offset
+    pub dim_x: u32,    // actual content dimensions (<= resolution)
     pub dim_y: u32,
     pub dim_z: u32,
     pub _pad0: u32,

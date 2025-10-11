@@ -121,6 +121,7 @@ impl VoxelManager {
         let gi = [GridInfo {
             resolution: initial_resolution,
             origin_x: 0.0,
+            origin_y: 0.0,
             dim_x: initial_resolution,
             dim_y: initial_resolution,
             dim_z: initial_resolution,
@@ -338,8 +339,7 @@ impl VoxelManager {
                 // Use actual content width (dim_x) for spacing instead of padded storage resolution.
                 let mut infos: Vec<GridInfo> = Vec::new();
                 let mut cursor = 0.0f32;
-                let mut row_y = 0.0f32; // future: pack in 2D; currently y always 0
-                let max_row_width = 10_000.0; // large sentinel; later could derive from camera framing
+                let mut row_y = 0.0f32; // 2D packing vertical offset accumulator
                 for (i, _view) in ready.iter().enumerate() {
                     let res =
                         self.grid_resolutions.get(i).copied().unwrap_or(self.voxel_resolution);
@@ -347,6 +347,7 @@ impl VoxelManager {
                     infos.push(GridInfo {
                         resolution: res,
                         origin_x: cursor,
+                        origin_y: row_y,
                         dim_x: dx,
                         dim_y: dy,
                         dim_z: dz,
@@ -354,9 +355,12 @@ impl VoxelManager {
                     });
                     // Advance by actual width plus 25% padding of that width
                     cursor += dx as f32 * 1.25;
-                    // (Optional) simple wrap if very large line; not currently expected to trigger.
-                    if cursor > max_row_width {
-                        row_y += 0.0; // placeholder for future vertical layout
+                    let row_height = dy as f32 * 1.25;
+                    // Simple heuristic: wrap when current row width exceeds 1.5 * average width so far or large sentinel
+                    // For now use a target aspect: if cursor > (max_y_so_far * 2.0) not available here, approximate by threshold.
+                    if cursor > 512.0 {
+                        // TODO: dynamic threshold (e.g., sqrt(total area))
+                        row_y += row_height;
                         cursor = 0.0;
                     }
                 }
@@ -427,6 +431,7 @@ impl VoxelManager {
         let gi = [GridInfo {
             resolution: self.voxel_resolution,
             origin_x: 0.0,
+            origin_y: 0.0,
             dim_x: self.voxel_resolution,
             dim_y: self.voxel_resolution,
             dim_z: self.voxel_resolution,
