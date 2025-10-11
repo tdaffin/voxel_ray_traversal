@@ -88,79 +88,85 @@ impl App {
                     );
                 }
 
-                ui.colored_label(
-                    Color32::LIGHT_RED,
-                    "Warning: Very high resolutions may exhaust GPU memory.",
-                );
-                ui.label("Each (resizable) grid can have its own resolution (multiple of 8).");
-                for i in 0..self.future_grid_resolutions.len() {
-                    // Hide resolution slider for native .vox models which use intrinsic dimensions
-                    let is_vox = self
-                        .voxel
-                        .manager
-                        .models
-                        .get(i)
-                        .map(|m| m.extension.as_str() == "vox")
-                        .unwrap_or(false);
-                    if is_vox {
-                        ui.label(format!("Grid {i} Res: native (.vox)"));
-                        continue;
+                // Advanced section collapsed by default
+                egui::CollapsingHeader::new("Advanced").default_open(false).show(ui, |ui| {
+                    ui.colored_label(
+                        Color32::LIGHT_RED,
+                        "Warning: Very high resolutions may exhaust GPU memory.",
+                    );
+                    ui.label("Each (resizable) grid can have its own resolution (multiple of 8).");
+                    for i in 0..self.future_grid_resolutions.len() {
+                        // Hide resolution slider for native .vox models which use intrinsic dimensions
+                        let is_vox = self
+                            .voxel
+                            .manager
+                            .models
+                            .get(i)
+                            .map(|m| m.extension.as_str() == "vox")
+                            .unwrap_or(false);
+                        if is_vox {
+                            ui.label(format!("Grid {i} Res: native (.vox)"));
+                            continue;
+                        }
+                        let mut val = self.future_grid_resolutions[i];
+                        let label = format!("Grid {i} Res");
+                        if ui.add(egui::Slider::new(&mut val, 8..=4096).text(label)).changed() {
+                            // snap to multiple of 8
+                            val = val.div_ceil(8) * 8;
+                            self.future_grid_resolutions[i] = val;
+                        }
                     }
-                    let mut val = self.future_grid_resolutions[i];
-                    let label = format!("Grid {i} Res");
-                    if ui.add(egui::Slider::new(&mut val, 8..=4096).text(label)).changed() {
-                        // snap to multiple of 8
-                        val = val.div_ceil(8) * 8;
-                        self.future_grid_resolutions[i] = val;
+                    ui.label("Discovered Models:");
+                    for (i, m) in self.voxel.manager.models.iter().enumerate() {
+                        // Fetch actual dimensions if available
+                        let dims = self.voxel.manager.grid_dims.get(i).copied().unwrap_or((
+                            self.voxel.manager.grid_resolutions.get(i).copied().unwrap_or(0),
+                            0,
+                            0,
+                        ));
+                        let (dx, dy, dz) = dims;
+                        let storage =
+                            self.voxel.manager.grid_resolutions.get(i).copied().unwrap_or(0);
+                        let dim_str = if dx == dy && dy == dz {
+                            format!("{}³", dx)
+                        } else {
+                            format!("{}×{}×{}", dx, dy, dz)
+                        };
+                        let storage_note = if storage != dx || storage != dy || storage != dz {
+                            format!(" (storage cube {}³)", storage)
+                        } else {
+                            String::new()
+                        };
+                        ui.label(format!(
+                            "{}: {} (.{}) dims={}{}",
+                            i, m.name, m.extension, dim_str, storage_note
+                        ));
                     }
-                }
-                ui.label("Discovered Models:");
-                for (i, m) in self.voxel.manager.models.iter().enumerate() {
-                    // Fetch actual dimensions if available
-                    let dims = self.voxel.manager.grid_dims.get(i).copied().unwrap_or((
-                        self.voxel.manager.grid_resolutions.get(i).copied().unwrap_or(0),
-                        0,
-                        0,
-                    ));
-                    let (dx, dy, dz) = dims;
-                    let storage = self.voxel.manager.grid_resolutions.get(i).copied().unwrap_or(0);
-                    let dim_str = if dx == dy && dy == dz {
-                        format!("{}³", dx)
-                    } else {
-                        format!("{}×{}×{}", dx, dy, dz)
-                    };
-                    let storage_note = if storage != dx || storage != dy || storage != dz {
-                        format!(" (storage cube {}³)", storage)
-                    } else {
-                        String::new()
-                    };
-                    ui.label(format!(
-                        "{}: {} (.{}) dims={}{}",
-                        i, m.name, m.extension, dim_str, storage_note
-                    ));
-                }
-                if ui.button("Regenerate Grids").clicked() {
-                    request_regen_voxels = true;
-                }
-                if ui.button("Cancel Voxelization").clicked() {
-                    self.voxel.manager.cancel();
-                }
-                ui.separator();
-                // Progress overview
-                let total = self.voxel.manager.voxel_pending.len();
-                let remaining = self.voxel.manager.voxel_pending.iter().filter(|b| **b).count();
-                ui.label(format!("Voxelization: {} / {} finished", total - remaining, total));
-                for (i, (done, total_tris)) in self.voxel.manager.voxel_progress.iter().enumerate()
-                {
-                    let (d, t) = (*done, *total_tris);
-                    let pct = if t > 0 { (d as f32 / t as f32 * 100.0).min(100.0) } else { 0.0 };
-                    let status = if self.voxel.manager.voxel_pending[i] {
-                        if t > 0 { format!("{pct:.1}%") } else { "…".into() }
-                    } else {
-                        "✓".into()
-                    };
-                    ui.label(format!("Grid {i}: {status}"));
-                }
+                    if ui.button("Regenerate Grids").clicked() {
+                        request_regen_voxels = true;
+                    }
+                    if ui.button("Cancel Voxelization").clicked() {
+                        self.voxel.manager.cancel();
+                    }
+                    ui.separator();
+                    // Progress overview
+                    let total = self.voxel.manager.voxel_pending.len();
+                    let remaining = self.voxel.manager.voxel_pending.iter().filter(|b| **b).count();
+                    ui.label(format!("Voxelization: {} / {} finished", total - remaining, total));
+                    for (i, (done, total_tris)) in
+                        self.voxel.manager.voxel_progress.iter().enumerate()
+                    {
+                        let (d, t) = (*done, *total_tris);
+                        let pct =
+                            if t > 0 { (d as f32 / t as f32 * 100.0).min(100.0) } else { 0.0 };
+                        let status = if self.voxel.manager.voxel_pending[i] {
+                            if t > 0 { format!("{pct:.1}%") } else { "…".into() }
+                        } else {
+                            "✓".into()
+                        };
+                        ui.label(format!("Grid {i}: {status}"));
+                    }
+                });
             });
 
             let fps_val = current_fps; // captured outside mutable borrow of self
