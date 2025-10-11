@@ -104,7 +104,28 @@ impl App {
                 }
                 ui.label("Discovered Models:");
                 for (i, m) in self.voxel.manager.models.iter().enumerate() {
-                    ui.label(format!("{}: {} ({})", i, m.name, m.extension));
+                    // Fetch actual dimensions if available
+                    let dims = self.voxel.manager.grid_dims.get(i).copied().unwrap_or((
+                        self.voxel.manager.grid_resolutions.get(i).copied().unwrap_or(0),
+                        0,
+                        0,
+                    ));
+                    let (dx, dy, dz) = dims;
+                    let storage = self.voxel.manager.grid_resolutions.get(i).copied().unwrap_or(0);
+                    let dim_str = if dx == dy && dy == dz {
+                        format!("{}³", dx)
+                    } else {
+                        format!("{}×{}×{}", dx, dy, dz)
+                    };
+                    let storage_note = if storage != dx || storage != dy || storage != dz {
+                        format!(" (storage cube {}³)", storage)
+                    } else {
+                        String::new()
+                    };
+                    ui.label(format!(
+                        "{}: {} (.{}) dims={}{}",
+                        i, m.name, m.extension, dim_str, storage_note
+                    ));
                 }
                 if ui.button("Regenerate Grids").clicked() {
                     request_regen_voxels = true;
@@ -167,6 +188,14 @@ impl App {
                     format_with_commas(render_extent[1] as u64),
                     format_with_commas((render_extent[0] * render_extent[1]) as u64)
                 ));
+                // List active grid dims summary
+                if !self.voxel.manager.grid_dims.is_empty() {
+                    ui.separator();
+                    ui.label("Grid Dimensions:");
+                    for (i, (dx, dy, dz)) in self.voxel.manager.grid_dims.iter().enumerate() {
+                        ui.label(format!("Grid {i}: {}×{}×{}", dx, dy, dz));
+                    }
+                }
             });
         });
 
