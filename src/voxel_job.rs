@@ -507,7 +507,12 @@ impl VoxelManager {
         // apply future resolutions
         for (i, r) in self.future_grid_resolutions.clone().into_iter().enumerate() {
             if i < self.grid_resolutions.len() {
-                self.grid_resolutions[i] = r.div_ceil(8) * 8;
+                // Do not override native .vox model resolutions; they come from the file.
+                let is_vox =
+                    self.models.get(i).map(|m| m.extension.as_str() == "vox").unwrap_or(false);
+                if !is_vox {
+                    self.grid_resolutions[i] = r.div_ceil(8) * 8;
+                }
             }
         }
         if let Some(maxr) = self.grid_resolutions.iter().copied().max() {

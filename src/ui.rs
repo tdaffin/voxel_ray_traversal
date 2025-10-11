@@ -92,8 +92,20 @@ impl App {
                     Color32::LIGHT_RED,
                     "Warning: Very high resolutions may exhaust GPU memory.",
                 );
-                ui.label("Each grid can now have its own resolution (multiple of 8).");
+                ui.label("Each (resizable) grid can have its own resolution (multiple of 8).");
                 for i in 0..self.future_grid_resolutions.len() {
+                    // Hide resolution slider for native .vox models which use intrinsic dimensions
+                    let is_vox = self
+                        .voxel
+                        .manager
+                        .models
+                        .get(i)
+                        .map(|m| m.extension.as_str() == "vox")
+                        .unwrap_or(false);
+                    if is_vox {
+                        ui.label(format!("Grid {i} Res: native (.vox)"));
+                        continue;
+                    }
                     let mut val = self.future_grid_resolutions[i];
                     let label = format!("Grid {i} Res");
                     if ui.add(egui::Slider::new(&mut val, 8..=4096).text(label)).changed() {
