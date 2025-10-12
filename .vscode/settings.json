@@ -3,5 +3,8 @@
     "*.comp": "glsl",
     "*.vert": "glsl",
     "*.frag": "glsl"
-  }
+  },
+  "glsllint.glslangValidatorArgs": [
+    "-V"
+  ]
 }
