@@ -59,6 +59,7 @@ pub fn vox_to_voxels(
     let mut remap: [u8; 256] = [0; 256];
     let mut remap_assigned: [bool; 256] = [false; 256];
     let mut used_colors: Vec<[f32; 4]> = Vec::new();
+    let mut local_orig_indices: Vec<usize> = Vec::new();
     // Determine maximum number of palette entries to capture for this model.
     let max_colors = if palette_span == 0 { 255 } else { palette_span as usize };
     // Prepare palette slice (truncate to palette_span, if provided)
@@ -95,6 +96,7 @@ pub fn vox_to_voxels(
             used_colors.push(rgba);
             remap[orig] = local_index;
             remap_assigned[orig] = true;
+            local_orig_indices.push(orig);
             local_index
         } else {
             // Fallback: reuse the first color if available, otherwise zero.
@@ -104,6 +106,25 @@ pub fn vox_to_voxels(
         };
         colors[(z * sy + y) * sx + x] = mapped_local;
     }
+
+    if !used_colors.is_empty() {
+        let mut usage_counts = vec![0usize; used_colors.len()];
+        for &li in &colors {
+            if let Some(entry) = usage_counts.get_mut(li as usize) {
+                *entry += 1;
+            }
+        }
+        eprintln!("VOX palette usage for {} [{}]:", path_ref.display(), max_colors);
+        for (local_idx, ((&orig_idx, &count), &rgba)) in
+            local_orig_indices.iter().zip(usage_counts.iter()).zip(used_colors.iter()).enumerate()
+        {
+            eprintln!(
+                "  local {:>3} | original {:>3} | count {:>6} | rgb ({:.3}, {:.3}, {:.3})",
+                local_idx, orig_idx, count, rgba[0], rgba[1], rgba[2]
+            );
+        }
+    }
+
     Some(VoxLoadResult {
         voxels,
         colors,
