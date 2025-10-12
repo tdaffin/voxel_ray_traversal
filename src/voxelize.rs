@@ -159,7 +159,7 @@ fn voxelize_mesh_progress(
     let storage_d = (dz + 7) / 8;
     let packed_texel_count = (storage_w * storage_h * storage_d) as usize;
     let mut voxels = vec![0u128; packed_texel_count];
-    let mut color_indices = vec![0u8; (dx * dy * dz) as usize];
+    let color_indices = vec![0u8; (dx * dy * dz) as usize];
     let total = mesh.triangles.len();
     let mut processed = 0usize;
     for triangle in &mesh.triangles {
@@ -181,9 +181,7 @@ fn voxelize_mesh_progress(
             let texel = (tx + (ty + tz * storage_h as usize) * storage_w as usize) as usize;
             let bit = (x % 4) * 32 + (y % 4) + (z % 8) * 4;
             voxels[texel] |= 1u128 << bit;
-            // Procedural local palette index: gradient based on z low 4 bits (0..15)
-            let idx_local = (z as u8) & 0x0F;
-            color_indices[(z * dy as usize + y) * dx as usize + x] = idx_local;
+            // Leave `color_indices` at 0 so the caller can map all voxels to a single palette entry.
         });
         processed += 1;
         if processed % 256 == 0 {

@@ -259,9 +259,18 @@ impl VoxelManager {
                             )
                         }
                     } else {
-                        // PLY path now uses local 0-based palette indices; pass 0 (ignored in implementation)
-                        let (v, c, logical, storage) = voxelize::ply_to_voxels(&path, res);
-                        (v, c, None, Some(logical), Some(storage))
+                        let (v, _c, logical, storage) = voxelize::ply_to_voxels(&path, res);
+                        let (dx, dy, dz) = logical;
+                        let color_count = dx as usize * dy as usize * dz as usize;
+                        let colors = vec![0u8; color_count];
+                        let mut rng = rand::thread_rng();
+                        let palette_color = [
+                            rng.gen_range(0.0..1.0),
+                            rng.gen_range(0.0..1.0),
+                            rng.gen_range(0.0..1.0),
+                            1.0,
+                        ];
+                        (v, colors, Some(vec![palette_color]), Some(logical), Some(storage))
                     };
                 let used_res = res; // keep legacy resolution for now (could be dim max)
                 let (dx, dy, dz) = dims_opt.unwrap_or((used_res, used_res, used_res));
@@ -286,17 +295,6 @@ impl VoxelManager {
                         generation: generation_id,
                         index: idx,
                         colors: pslice,
-                    });
-                } else {
-                    // PLY placeholder: generate simple 16-color grayscale slice matching previous procedural use
-                    let mut slice = Vec::new();
-                    for i in 0..16u8 {
-                        slice.push([i as f32 / 15.0, i as f32 / 15.0, i as f32 / 15.0, 1.0]);
-                    }
-                    let _ = txc.send(VoxelJobMessage::PaletteSlice {
-                        generation: generation_id,
-                        index: idx,
-                        colors: slice,
                     });
                 }
             });
@@ -741,9 +739,19 @@ impl VoxelManager {
                         let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
                     }
                 } else {
-                    if let Some((vox, colors, _logical, _storage)) =
+                    if let Some((vox, _colors, logical, storage)) =
                         ply_to_voxels_with_progress(&path, res_for_grid, prog_cb)
                     {
+                        let (dim_x, dim_y, dim_z) = logical;
+                        let color_count = dim_x as usize * dim_y as usize * dim_z as usize;
+                        let colors = vec![0u8; color_count];
+                        let mut rng = rand::thread_rng();
+                        let palette_slice = vec![[
+                            rng.gen_range(0.0..1.0),
+                            rng.gen_range(0.0..1.0),
+                            rng.gen_range(0.0..1.0),
+                            1.0,
+                        ]];
                         if !cancelled.load(Ordering::Relaxed) {
                             let _ = txc.send(VoxelJobMessage::Finished {
                                 generation: gen_thread,
@@ -751,27 +759,17 @@ impl VoxelManager {
                                 data: vox,
                                 colors,
                                 resolution: res_for_grid,
-                                dim_x: res_for_grid,
-                                dim_y: res_for_grid,
-                                dim_z: res_for_grid,
-                                storage_w: res_for_grid / 4,
-                                storage_h: res_for_grid / 4,
-                                storage_d: res_for_grid / 8,
+                                dim_x: dim_x,
+                                dim_y: dim_y,
+                                dim_z: dim_z,
+                                storage_w: storage.0,
+                                storage_h: storage.1,
+                                storage_d: storage.2,
                             });
-                            // Emit procedural palette slice (grayscale ramp)
-                            let mut slice = Vec::new();
-                            for i in 0..16u8 {
-                                slice.push([
-                                    i as f32 / 15.0,
-                                    i as f32 / 15.0,
-                                    i as f32 / 15.0,
-                                    1.0,
-                                ]);
-                            }
                             let _ = txc.send(VoxelJobMessage::PaletteSlice {
                                 generation: gen_thread,
                                 index: idx,
-                                colors: slice,
+                                colors: palette_slice,
                             });
                         } else {
                             let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
