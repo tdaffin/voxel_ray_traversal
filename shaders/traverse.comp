@@ -98,19 +98,15 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, out vec3 color,
         return false;
     }
 
-    uint stepped_axis;
-    if (tmins.x < tmins.y) {
-        if (tmins.x < tmins.z) {
-            stepped_axis = 0;
-        } else {
-            stepped_axis = 2;
-        }
-    } else {
-        if (tmins.y < tmins.z) {
-            stepped_axis = 1;
-        } else {
-            stepped_axis = 2;
-        }
+    uint stepped_axis = 0u;
+    float stepped_t = tmins.x;
+    if (tmins.y > stepped_t) {
+        stepped_axis = 1u;
+        stepped_t = tmins.y;
+    }
+    if (tmins.z > stepped_t) {
+        stepped_axis = 2u;
+        stepped_t = tmins.z;
     }
 
     origin += dir * tmin;
