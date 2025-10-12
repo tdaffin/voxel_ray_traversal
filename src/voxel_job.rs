@@ -65,6 +65,17 @@ fn rotation_from_axis_angle(axis: [f32; 3], angle: f32) -> [[f32; 4]; 4] {
     ]
 }
 
+fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut out = [[0.0f32; 4]; 4];
+    for i in 0..4 {
+        for j in 0..4 {
+            out[i][j] =
+                a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j] + a[i][3] * b[3][j];
+        }
+    }
+    out
+}
+
 fn random_rotation_matrix<R: Rng + ?Sized>(rng: &mut R) -> [[f32; 4]; 4] {
     // Marsaglia method for random unit vector
     let u: f32 = rng.gen_range(-1.0..=1.0);
@@ -138,6 +149,7 @@ pub struct VoxelManager {
     pub grid_dims: Vec<(u32, u32, u32)>,
     pub grid_storage: Vec<(u32, u32, u32)>, // (storage_w, storage_h, storage_d)
     pub grid_user_transforms: Vec<[[f32; 4]; 4]>,
+    pub grid_rotation_speeds: Vec<f32>, // radians per second
     pub future_grid_resolutions: Vec<u32>,
     pub active_voxel_grids: u32,
 
@@ -161,6 +173,7 @@ pub struct VoxelManager {
     ground_palette_slice: Vec<[f32; 4]>,
     ground_palette_base: u32,
     ground_palette_len: u32,
+    grid_rotation_angles: Vec<f32>,
     voxel_result_rx: Receiver<VoxelJobMessage>,
     voxel_generation: u64,
     cancel_requested: bool,
@@ -185,6 +198,8 @@ impl VoxelManager {
                 model_count
             ];
         let grid_user_transforms = vec![identity_mat4(); model_count];
+        let grid_rotation_speeds = vec![0.0f32; model_count];
+        let grid_rotation_angles = vec![0.0f32; model_count];
         let future_grid_resolutions = grid_resolutions.clone();
         let placeholder_view = create_empty_voxel_placeholder(
             memory_allocator.clone(),
@@ -370,6 +385,7 @@ impl VoxelManager {
             grid_dims,
             grid_storage,
             grid_user_transforms,
+            grid_rotation_speeds,
             future_grid_resolutions,
             active_voxel_grids,
             voxel_views,
@@ -390,6 +406,7 @@ impl VoxelManager {
             ground_palette_slice,
             ground_palette_base,
             ground_palette_len,
+            grid_rotation_angles,
             voxel_result_rx: rx,
             voxel_generation,
             cancel_requested: false,
@@ -401,6 +418,7 @@ impl VoxelManager {
         &mut self, descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
         render_pipeline: &HotReloadComputePipeline, memory_allocator: Arc<StandardMemoryAllocator>,
         command_buffer_allocator: Arc<StandardCommandBufferAllocator>, queue: Arc<Queue>,
+        delta_seconds: f32,
     ) {
         let mut dirty = false;
         while let Ok(msg) = self.voxel_result_rx.try_recv() {
@@ -487,7 +505,8 @@ impl VoxelManager {
                 }
             }
         }
-        if dirty {
+        let rotations_dirty = self.advance_rotation_angles(delta_seconds);
+        if dirty || rotations_dirty {
             self.rebuild_descriptor_set(
                 descriptor_set_allocator,
                 render_pipeline,
@@ -500,7 +519,26 @@ impl VoxelManager {
         if self.grid_user_transforms.len() < self.models.len() {
             let needed = self.models.len() - self.grid_user_transforms.len();
             self.grid_user_transforms.extend((0..needed).map(|_| identity_mat4()));
+            self.grid_rotation_speeds.extend(std::iter::repeat(0.0).take(needed));
+            self.grid_rotation_angles.extend(std::iter::repeat(0.0).take(needed));
         }
+    }
+
+    fn advance_rotation_angles(&mut self, delta_seconds: f32) -> bool {
+        if delta_seconds <= 0.0 {
+            return false;
+        }
+        self.ensure_transform_capacity();
+        let mut changed = false;
+        for (angle, speed) in
+            self.grid_rotation_angles.iter_mut().zip(self.grid_rotation_speeds.iter())
+        {
+            if speed.abs() > f32::EPSILON {
+                *angle = (*angle + speed * delta_seconds).rem_euclid(TAU);
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn place_row(
@@ -512,9 +550,20 @@ impl VoxelManager {
         for &(descriptor_idx, orig_index, res, dx, dy, dz) in row.iter() {
             let (storage_w, storage_h, storage_d) =
                 self.grid_storage.get(orig_index).copied().unwrap_or((res / 4, res / 4, res / 8));
-            let rotation =
+            let mut rotation =
                 self.grid_user_transforms.get(orig_index).cloned().unwrap_or_else(identity_mat4);
-            let transform = compose_transform(rotation, [x, base_y, 0.0]);
+            if let Some(angle) = self.grid_rotation_angles.get(orig_index) {
+                if angle.abs() > f32::EPSILON {
+                    let yaw = rotation_from_axis_angle([0.0, 0.0, 1.0], *angle);
+                    rotation = mat4_mul(rotation, yaw);
+                }
+            }
+            let center = [dx as f32 * 0.5, dy as f32 * 0.5, dz as f32 * 0.5];
+            let to_center = translation_to_mat4([-center[0], -center[1], -center[2]]);
+            let back_center = translation_to_mat4(center);
+            let base_translation = translation_to_mat4([x, base_y, 0.0]);
+            let transform =
+                mat4_mul(mat4_mul(mat4_mul(to_center, rotation), back_center), base_translation);
             infos[descriptor_idx] = GridInfo {
                 resolution: res,
                 dim_x: dx,

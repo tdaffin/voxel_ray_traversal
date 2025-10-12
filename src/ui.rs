@@ -167,6 +167,15 @@ impl App {
                                 "{}: {} (.{} ) dims={}{}",
                                 i, model.name, model.extension, dim_str, storage_note
                             );
+                            let speed_rad = self
+                                .voxel
+                                .manager
+                                .grid_rotation_speeds
+                                .get(i)
+                                .copied()
+                                .unwrap_or(0.0);
+                            let mut speed_deg = speed_rad.to_degrees();
+                            let mut speed_changed = false;
                             ui.horizontal(|ui| {
                                 ui.label(&label_text);
                                 if ui
@@ -176,7 +185,27 @@ impl App {
                                 {
                                     self.voxel.randomize_rotation(i, &self.pipelines.render);
                                 }
+                                ui.label("Spin:");
+                                let response = ui
+                                    .add(
+                                        egui::DragValue::new(&mut speed_deg)
+                                            .speed(5.0)
+                                            .suffix("°/s"),
+                                    )
+                                    .on_hover_text(
+                                        "Rotation speed around the grid's vertical axis",
+                                    );
+                                if response.changed() {
+                                    speed_changed = true;
+                                }
                             });
+                            if speed_changed {
+                                if let Some(entry) =
+                                    self.voxel.manager.grid_rotation_speeds.get_mut(i)
+                                {
+                                    *entry = speed_deg.to_radians();
+                                }
+                            }
                         }
                         if ui.button("Regenerate Grids").clicked() {
                             request_regen_voxels = true;

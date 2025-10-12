@@ -43,13 +43,14 @@ impl VoxelSystem {
         }
     }
 
-    pub fn poll(&mut self, render_pipeline: &HotReloadComputePipeline) {
+    pub fn poll(&mut self, render_pipeline: &HotReloadComputePipeline, delta_seconds: f32) {
         self.manager.poll(
             self.descriptor_set_allocator.clone(),
             render_pipeline,
             self.memory_allocator.clone(),
             self.command_buffer_allocator.clone(),
             self.queue.clone(),
+            delta_seconds,
         );
     }
 

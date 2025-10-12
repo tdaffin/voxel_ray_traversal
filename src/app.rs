@@ -88,7 +88,9 @@ impl App {
         // Update input (camera movement, focus toggles)
         self.input.update(&mut self.camera, &rcx.window);
         // Drain any completed voxelization results and upload to GPU
-        self.voxel.poll(&self.pipelines.render);
+        let delta_seconds =
+            self.input.helper().delta_time().map(|d| d.as_secs_f32()).unwrap_or(0.0);
+        self.voxel.poll(&self.pipelines.render, delta_seconds);
     }
 
     fn render(&mut self, _event_loop: &ActiveEventLoop) {
