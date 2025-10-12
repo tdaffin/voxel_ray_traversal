@@ -32,7 +32,7 @@ impl InputController {
                 let v = Vector3::new(KeyCode::KeyD, KeyCode::KeyW, KeyCode::KeyQ).map(t)
                     - Vector3::new(KeyCode::KeyA, KeyCode::KeyS, KeyCode::KeyE).map(t);
                 camera.position += (camera.rotation_matrix() * v.push(0.0) * dt).xyz();
-                let sens = 0.001 * (camera.fov.to_radians() * 0.5).tan();
+                let sens = camera.mouse_sensitivity * (camera.fov.to_radians() * 0.5).tan();
                 let (dx, dy) = self.helper.mouse_diff();
                 camera.rotation.z -= dx as f64 * sens;
                 camera.rotation.x -= dy as f64 * sens;

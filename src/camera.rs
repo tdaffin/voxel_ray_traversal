@@ -5,11 +5,20 @@ pub struct Camera {
     pub rotation: Vector3<f64>,
     pub extent: [f64; 2],
     pub fov: f64,
+    pub mouse_sensitivity: f64,
 }
 
 impl Camera {
+    pub const DEFAULT_MOUSE_SENSITIVITY: f64 = 0.0025;
+
     pub fn new(position: Vector3<f64>, rotation: Vector3<f64>, extent: [f64; 2], fov: f64) -> Self {
-        Camera { position, rotation, extent, fov }
+        Camera {
+            position,
+            rotation,
+            extent,
+            fov,
+            mouse_sensitivity: Self::DEFAULT_MOUSE_SENSITIVITY,
+        }
     }
 
     pub fn look_direction(&mut self, direction: Vector3<f64>) {

@@ -44,6 +44,16 @@ impl App {
                         trigger_benchmark = true;
                     }
                     ui.add(egui::Slider::new(&mut self.camera.fov, 0.0..=180.0).text("FOV"));
+                    let mut mouse_sense = self.camera.mouse_sensitivity as f32;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut mouse_sense, 0.0005..=0.01)
+                                .text("Mouse Sensitivity"),
+                        )
+                        .changed()
+                    {
+                        self.camera.mouse_sensitivity = mouse_sense as f64;
+                    }
                     ui.separator();
                     ui.label("Light Direction (spherical):");
                     static mut THETA: f32 = 0.9; // elevation
