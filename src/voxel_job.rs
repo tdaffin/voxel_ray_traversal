@@ -231,7 +231,7 @@ impl VoxelManager {
             let generation_id = voxel_generation;
             // Legacy base_palette_index removed; indices now local per grid until compaction.
             thread::spawn(move || {
-                let palette_span = (256 / model_count as u32) as u8; // soft cap per model prior to compaction
+                let palette_span: u8 = u8::MAX; // allow .vox models to retain all colors
                 let (vox, colors, palette_opt, dims_opt, storage_opt) =
                     if path.extension().and_then(|e| e.to_str()) == Some("vox") {
                         if !path.exists() {
@@ -681,7 +681,6 @@ impl VoxelManager {
         self.voxel_result_rx = rx;
         let generation_id = self.voxel_generation;
         let cancel_flag = self.voxel_cancel_flag.clone();
-        let model_count = self.models.len().max(1);
         for (idx, model) in self.models.iter().enumerate() {
             let txc = tx.clone();
             let path = model.path.clone();
@@ -708,7 +707,7 @@ impl VoxelManager {
                 };
                 if path.extension().and_then(|e| e.to_str()) == Some("vox") {
                     // No progress callbacks for .vox yet (fast load typically); still send palette slice.
-                    let palette_span = (256 / model_count as u32) as u8;
+                    let palette_span: u8 = u8::MAX;
                     if !path.exists() {
                         eprintln!("[voxel] .vox file missing: {}", path.display());
                         let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });

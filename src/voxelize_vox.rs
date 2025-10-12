@@ -57,8 +57,11 @@ pub fn vox_to_voxels(
     // Build a remap table from MagicaVoxel color index -> local subrange offset
     // MagicaVoxel palette indices are 1..=255; 0 unused.
     let mut remap: [u8; 256] = [0; 256];
+    let mut remap_assigned: [bool; 256] = [false; 256];
     let mut used_colors: Vec<[f32; 4]> = Vec::new();
-    // Prepare palette slice (truncate to palette_span)
+    // Determine maximum number of palette entries to capture for this model.
+    let max_colors = if palette_span == 0 { 255 } else { palette_span as usize };
+    // Prepare palette slice (truncate to palette_span, if provided)
     // scene.palette holds 256 RGBA (u8) entries (MagicaVoxel), default if missing.
     let palette_rgba = &scene.palette;
     // We'll lazily assign as voxels encountered to keep only used subset (up to span)
@@ -76,25 +79,28 @@ pub fn vox_to_voxels(
         let bit = (x % 4) * 32 + (y % 4) + (z % 8) * 4;
         voxels[texel] |= 1u128 << bit;
         let orig = v.i as usize; // 0..255
-        let mapped_local = if remap[orig] != 0 || orig == 0 {
+        let mapped_local = if orig == 0 {
+            0
+        } else if remap_assigned[orig] {
             remap[orig]
+        } else if used_colors.len() < max_colors {
+            let pal = palette_rgba[orig];
+            let rgba = [
+                pal.r as f32 / 255.0,
+                pal.g as f32 / 255.0,
+                pal.b as f32 / 255.0,
+                pal.a as f32 / 255.0,
+            ];
+            let local_index = used_colors.len() as u8;
+            used_colors.push(rgba);
+            remap[orig] = local_index;
+            remap_assigned[orig] = true;
+            local_index
         } else {
-            // allocate a new local slot (0..palette_span-1)
-            if used_colors.len() < palette_span as usize {
-                let pal = palette_rgba[orig];
-                let rgba = [
-                    pal.r as f32 / 255.0,
-                    pal.g as f32 / 255.0,
-                    pal.b as f32 / 255.0,
-                    pal.a as f32 / 255.0,
-                ];
-                used_colors.push(rgba);
-                let local_offset = used_colors.len() as u8 - 1;
-                remap[orig] = local_offset.max(1); // keep 0 for empty if orig==0
-                remap[orig]
-            } else {
-                0 // fallback to first color if we exceeded span
-            }
+            // Fallback: reuse the first color if available, otherwise zero.
+            remap[orig] = 0;
+            remap_assigned[orig] = true;
+            0
         };
         colors[(z * sy + y) * sx + x] = mapped_local;
     }
