@@ -543,7 +543,7 @@ impl VoxelManager {
 
     fn place_row(
         &self, row: &[(usize, usize, u32, u32, u32, u32)], base_y: f32, padding: f32,
-        infos: &mut [GridInfo],
+        infos: &mut [GridInfo], layout_extents: &mut Vec<(f32, f32, f32, f32)>,
     ) -> f32 {
         let mut x = 0.0f32;
         let mut max_h = 0.0f32;
@@ -577,6 +577,11 @@ impl VoxelManager {
                 grid_to_world: transform,
                 ..GridInfo::default()
             };
+            let center_x = x + dx as f32 * 0.5;
+            let center_y = base_y + dy as f32 * 0.5;
+            let radius = 0.5 * ((dx as f32).hypot(dy as f32));
+            let base_z = infos[descriptor_idx].grid_to_world[3][2];
+            layout_extents.push((center_x, center_y, radius, base_z));
             x += dx as f32 * (1.0 + padding);
             max_h = max_h.max(dy as f32 * (1.0 + padding));
         }
@@ -622,6 +627,7 @@ impl VoxelManager {
 
         let target_row_width = (total_area.sqrt() as f32).max(1.0);
         let mut infos: Vec<GridInfo> = vec![GridInfo::default(); ready.len()];
+        let mut layout_extents: Vec<(f32, f32, f32, f32)> = Vec::with_capacity(ready.len());
         let mut row_y = 0.0f32;
         let mut cursor = 0.0f32;
         let mut current_row: Vec<(usize, usize, u32, u32, u32, u32)> = Vec::new();
@@ -634,7 +640,8 @@ impl VoxelManager {
                 cursor + dx as f32 * (1.0 + PADDING)
             };
             if !current_row.is_empty() && projected > target_row_width * 1.25 {
-                let used_h = self.place_row(&current_row, row_y, PADDING, &mut infos);
+                let used_h =
+                    self.place_row(&current_row, row_y, PADDING, &mut infos, &mut layout_extents);
                 row_y += used_h;
                 current_row.clear();
             }
@@ -642,27 +649,22 @@ impl VoxelManager {
             current_row.push(entry);
         }
         if !current_row.is_empty() {
-            let _ = self.place_row(&current_row, row_y, PADDING, &mut infos);
+            let _ = self.place_row(&current_row, row_y, PADDING, &mut infos, &mut layout_extents);
         }
 
         let mut ground_transform_opt: Option<[[f32; 4]; 4]> = None;
-        if !infos.is_empty() {
+        if !layout_extents.is_empty() {
             let mut min_x = f32::MAX;
             let mut max_x = f32::MIN;
             let mut min_y = f32::MAX;
             let mut max_y = f32::MIN;
             let mut min_z = f32::MAX;
-            for info in infos.iter() {
-                let tx = info.grid_to_world[3][0];
-                let ty = info.grid_to_world[3][1];
-                let tz = info.grid_to_world[3][2];
-                let dx = info.dim_x as f32;
-                let dy = info.dim_y as f32;
-                min_x = min_x.min(tx);
-                max_x = max_x.max(tx + dx);
-                min_y = min_y.min(ty);
-                max_y = max_y.max(ty + dy);
-                min_z = min_z.min(tz);
+            for (cx, cy, radius, base_z) in layout_extents.iter() {
+                min_x = min_x.min(cx - radius);
+                max_x = max_x.max(cx + radius);
+                min_y = min_y.min(cy - radius);
+                max_y = max_y.max(cy + radius);
+                min_z = min_z.min(*base_z);
             }
             let width = (max_x - min_x).max(1.0);
             let depth = (max_y - min_y).max(1.0);
