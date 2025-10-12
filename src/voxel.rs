@@ -16,12 +16,10 @@ use vulkano::pipeline::Pipeline; // for layout() method
 use vulkano::pipeline::compute::ComputePipeline;
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, BufferContents)]
+#[derive(Clone, Copy, Debug, BufferContents)]
 pub struct GridInfo {
     pub resolution: u32, // cubic storage resolution (power-of-two-ish padded)
-    pub origin_x: f32,
-    pub origin_y: f32, // new: 2D packing vertical offset
-    pub dim_x: u32,    // actual content dimensions (<= resolution)
+    pub dim_x: u32,      // actual content dimensions (<= resolution)
     pub dim_y: u32,
     pub dim_z: u32,
     // New: storage extents (packed texture actual allocated dimensions). For now mirror cubic; will diverge when non-cubic storage enabled.
@@ -30,6 +28,35 @@ pub struct GridInfo {
     pub storage_d: u32,    // packed voxel texel depth (resolution/8 currently)
     pub palette_base: u32, // starting index into global palette buffer
     pub palette_len: u32,  // number of valid palette entries for this grid
+    pub _padding0: u32,
+    pub _padding1: u32,
+    pub _padding2: u32,
+    pub grid_to_world: [[f32; 4]; 4],
+}
+
+impl Default for GridInfo {
+    fn default() -> Self {
+        Self {
+            resolution: 0,
+            dim_x: 0,
+            dim_y: 0,
+            dim_z: 0,
+            storage_w: 0,
+            storage_h: 0,
+            storage_d: 0,
+            palette_base: 0,
+            palette_len: 0,
+            _padding0: 0,
+            _padding1: 0,
+            _padding2: 0,
+            grid_to_world: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        }
+    }
 }
 
 pub fn create_grid_info_buffer(

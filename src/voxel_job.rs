@@ -24,6 +24,15 @@ use crate::{
     voxelize,
 };
 
+fn translation_to_mat4(translation: [f32; 3]) -> [[f32; 4]; 4] {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [translation[0], translation[1], translation[2], 1.0],
+    ]
+}
+
 #[derive(Debug)]
 pub enum VoxelJobMessage {
     Finished {
@@ -135,8 +144,6 @@ impl VoxelManager {
         // Initial grid info (single placeholder)
         let gi = [GridInfo {
             resolution: initial_resolution,
-            origin_x: 0.0,
-            origin_y: 0.0,
             dim_x: initial_resolution,
             dim_y: initial_resolution,
             dim_z: initial_resolution,
@@ -145,6 +152,8 @@ impl VoxelManager {
             storage_d: initial_resolution / 8,
             palette_base: 0,
             palette_len: 0,
+            grid_to_world: translation_to_mat4([0.0, 0.0, 0.0]),
+            ..GridInfo::default()
         }];
         let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
         let voxel_set = build_voxel_descriptor_set(
@@ -411,8 +420,6 @@ impl VoxelManager {
                             .unwrap_or((res / 4, res / 4, res / 8));
                         infos[orig_index] = GridInfo {
                             resolution: res,
-                            origin_x: x,
-                            origin_y: base_y,
                             dim_x: dx,
                             dim_y: dy,
                             dim_z: dz,
@@ -421,6 +428,8 @@ impl VoxelManager {
                             storage_d,
                             palette_base: 0,
                             palette_len: 256,
+                            grid_to_world: translation_to_mat4([x, base_y, 0.0]),
+                            ..GridInfo::default()
                         };
                         x += dx as f32 * (1.0 + PADDING);
                         max_h = max_h.max(dy as f32 * (1.0 + PADDING));
@@ -551,8 +560,6 @@ impl VoxelManager {
         }
         let gi = [GridInfo {
             resolution: self.voxel_resolution,
-            origin_x: 0.0,
-            origin_y: 0.0,
             dim_x: self.voxel_resolution,
             dim_y: self.voxel_resolution,
             dim_z: self.voxel_resolution,
@@ -561,6 +568,8 @@ impl VoxelManager {
             storage_d: self.voxel_resolution / 8,
             palette_base: 0,
             palette_len: 0,
+            grid_to_world: translation_to_mat4([0.0, 0.0, 0.0]),
+            ..GridInfo::default()
         }];
         let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
         self.voxel_set = build_voxel_descriptor_set(
