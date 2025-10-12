@@ -32,13 +32,13 @@ impl App {
                         }
                     });
                     ui.separator();
-                    let max_grids = self.voxel.manager.models.len().max(1) as u32;
+                    let max_grids = (self.voxel.manager.models.len() + 1).max(1) as u32;
                     ui.add(
                         egui::Slider::new(
                             &mut self.voxel.manager.active_voxel_grids,
                             1..=max_grids,
                         )
-                        .text("Active Grids"),
+                        .text("Active Grids (incl. ground)"),
                     );
                     if ui.button("Benchmark Traversal Variants").clicked() {
                         trigger_benchmark = true;

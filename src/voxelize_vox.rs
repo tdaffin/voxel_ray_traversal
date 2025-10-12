@@ -152,7 +152,6 @@ mod tests {
         let scene = load_vox(path.to_str().unwrap()).expect("dot_vox load should succeed");
         let raw_unique: HashSet<u8> =
             scene.models.get(0).expect("model 0 should exist").voxels.iter().map(|v| v.i).collect();
-        println!("raw unique indices: {:?}", raw_unique);
         assert_eq!(raw_unique.len(), 5, "expected raw vox data to use five colors");
         assert_eq!(result.palette.len(), 5, "expected splodge.vox to contain five palette colors");
     }

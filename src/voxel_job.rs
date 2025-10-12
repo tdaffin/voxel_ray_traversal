@@ -79,6 +79,15 @@ fn translation_to_mat4(translation: [f32; 3]) -> [[f32; 4]; 4] {
     compose_transform(identity_mat4(), translation)
 }
 
+fn scale_translation_mat4(scale: [f32; 3], translation: [f32; 3]) -> [[f32; 4]; 4] {
+    [
+        [scale[0], 0.0, 0.0, 0.0],
+        [0.0, scale[1], 0.0, 0.0],
+        [0.0, 0.0, scale[2], 0.0],
+        [translation[0], translation[1], translation[2], 1.0],
+    ]
+}
+
 fn seeded_rng_for_path(path: &std::path::Path) -> ChaCha8Rng {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -144,6 +153,14 @@ pub struct VoxelManager {
     palette_slices: Vec<Option<Vec<[f32; 4]>>>,
     palette_bases: Vec<u32>,
     palette_lens: Vec<u32>,
+    ground_voxel_view: Arc<ImageView>,
+    ground_color_view: Arc<ImageView>,
+    ground_resolution: u32,
+    ground_dims: (u32, u32, u32),
+    ground_storage: (u32, u32, u32),
+    ground_palette_slice: Vec<[f32; 4]>,
+    ground_palette_base: u32,
+    ground_palette_len: u32,
     voxel_result_rx: Receiver<VoxelJobMessage>,
     voxel_generation: u64,
     cancel_requested: bool,
@@ -197,8 +214,35 @@ impl VoxelManager {
             let b = f(1.0);
             palette.push([r, g, b, 1.0]);
         }
+        let ground_palette_slice = vec![[0.2, 0.55, 0.25, 1.0]]; // grassy green
+        let ground_palette_base = palette.len() as u32;
+        let ground_palette_len = ground_palette_slice.len() as u32;
+        palette.extend_from_slice(&ground_palette_slice);
         let palette_buffer =
             crate::voxel::create_palette_buffer(memory_allocator.clone(), &palette);
+        let ground_resolution = 1u32;
+        let ground_dims = (1u32, 1u32, 1u32);
+        let ground_storage = (1u32, 1u32, 1u32);
+        let ground_voxels = vec![1u128];
+        let ground_voxel_view = create_voxel_image_view(
+            memory_allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            ground_voxels,
+            ground_storage.0,
+            ground_storage.1,
+            ground_storage.2,
+        );
+        let ground_colors = vec![0u8; (ground_dims.0 * ground_dims.1 * ground_dims.2) as usize];
+        let ground_color_view = crate::voxel::create_color_index_image_view(
+            memory_allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            ground_colors,
+            ground_dims.0,
+            ground_dims.1,
+            ground_dims.2,
+        );
         // Initial grid info (single placeholder)
         let gi = [GridInfo {
             resolution: initial_resolution,
@@ -338,6 +382,14 @@ impl VoxelManager {
             palette_slices: vec![None; model_count],
             palette_bases: vec![0; model_count],
             palette_lens: vec![0; model_count],
+            ground_voxel_view,
+            ground_color_view,
+            ground_resolution,
+            ground_dims,
+            ground_storage,
+            ground_palette_slice,
+            ground_palette_base,
+            ground_palette_len,
             voxel_result_rx: rx,
             voxel_generation,
             cancel_requested: false,
@@ -499,8 +551,8 @@ impl VoxelManager {
             }
         }
 
-        self.active_voxel_grids = ready.len() as u32;
-        if self.active_voxel_grids == 0 {
+        if ready.is_empty() {
+            self.active_voxel_grids = 0;
             return;
         }
 
@@ -544,26 +596,71 @@ impl VoxelManager {
             let _ = self.place_row(&current_row, row_y, PADDING, &mut infos);
         }
 
-        let all_ready = self.voxel_pending.iter().all(|p| !*p)
-            && self.palette_slices.iter().all(|s| s.is_some());
-        if all_ready {
-            let mut compact: Vec<[f32; 4]> = Vec::new();
-            for (i, slice_opt) in self.palette_slices.iter().enumerate() {
-                if let Some(slice) = slice_opt {
-                    self.palette_bases[i] = compact.len() as u32;
+        let mut ground_transform_opt: Option<[[f32; 4]; 4]> = None;
+        if !infos.is_empty() {
+            let mut min_x = f32::MAX;
+            let mut max_x = f32::MIN;
+            let mut min_y = f32::MAX;
+            let mut max_y = f32::MIN;
+            let mut min_z = f32::MAX;
+            for info in infos.iter() {
+                let tx = info.grid_to_world[3][0];
+                let ty = info.grid_to_world[3][1];
+                let tz = info.grid_to_world[3][2];
+                let dx = info.dim_x as f32;
+                let dy = info.dim_y as f32;
+                min_x = min_x.min(tx);
+                max_x = max_x.max(tx + dx);
+                min_y = min_y.min(ty);
+                max_y = max_y.max(ty + dy);
+                min_z = min_z.min(tz);
+            }
+            let width = (max_x - min_x).max(1.0);
+            let depth = (max_y - min_y).max(1.0);
+            let margin_ratio = 0.10;
+            let width_margin = width * margin_ratio;
+            let depth_margin = depth * margin_ratio;
+            let scale_x = width + width_margin;
+            let scale_y = depth + depth_margin;
+            let scale_z = 1.0;
+            let origin_x = min_x - width_margin * 0.5;
+            let origin_y = min_y - depth_margin * 0.5;
+            let origin_z = min_z - scale_z;
+            let transform =
+                scale_translation_mat4([scale_x, scale_y, scale_z], [origin_x, origin_y, origin_z]);
+            ground_transform_opt = Some(transform);
+        }
+
+        let mut compact: Vec<[f32; 4]> = Vec::new();
+        for (i, slice_opt) in self.palette_slices.iter().enumerate() {
+            let base = compact.len() as u32;
+            match slice_opt {
+                Some(slice) if !slice.is_empty() => {
+                    self.palette_bases[i] = base;
                     self.palette_lens[i] = slice.len() as u32;
                     compact.extend_from_slice(slice);
-                } else {
-                    self.palette_bases[i] = 0;
-                    self.palette_lens[i] = 0;
+                }
+                _ => {
+                    self.palette_bases[i] = base;
+                    self.palette_lens[i] = 1;
+                    compact.push([1.0, 1.0, 1.0, 1.0]); // placeholder until palette slice arrives
                 }
             }
-            if compact.is_empty() {
-                compact.push([1.0, 1.0, 1.0, 1.0]);
-            }
-            self.palette_buffer =
-                crate::voxel::create_palette_buffer(memory_allocator.clone(), &compact);
         }
+        let ground_base = compact.len() as u32;
+        if self.ground_palette_slice.is_empty() {
+            compact.push([0.2, 0.55, 0.25, 1.0]);
+            self.ground_palette_len = 1;
+        } else {
+            compact.extend_from_slice(&self.ground_palette_slice);
+            self.ground_palette_len = self.ground_palette_slice.len() as u32;
+        }
+        if compact.is_empty() {
+            compact.push([1.0, 1.0, 1.0, 1.0]);
+        }
+        self.ground_palette_base = ground_base;
+        self.palette_buffer =
+            crate::voxel::create_palette_buffer(memory_allocator.clone(), &compact);
 
         for (descriptor_idx, &orig_index) in ready_indices.iter().enumerate() {
             infos[descriptor_idx].palette_base =
@@ -572,7 +669,27 @@ impl VoxelManager {
                 self.palette_lens.get(orig_index).copied().unwrap_or(0);
         }
 
+        if let Some(transform) = ground_transform_opt {
+            let ground_info = GridInfo {
+                resolution: self.ground_resolution,
+                dim_x: self.ground_dims.0,
+                dim_y: self.ground_dims.1,
+                dim_z: self.ground_dims.2,
+                storage_w: self.ground_storage.0,
+                storage_h: self.ground_storage.1,
+                storage_d: self.ground_storage.2,
+                palette_base: self.ground_palette_base,
+                palette_len: self.ground_palette_len,
+                grid_to_world: transform,
+                ..GridInfo::default()
+            };
+            ready.push(self.ground_voxel_view.clone());
+            ready_colors.push(self.ground_color_view.clone());
+            infos.push(ground_info);
+        }
+
         let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &infos);
+        self.active_voxel_grids = ready.len() as u32;
         self.voxel_set = build_voxel_descriptor_set(
             descriptor_set_allocator,
             render_pipeline,
@@ -655,6 +772,11 @@ impl VoxelManager {
         for p in &mut self.voxel_progress {
             *p = (0, 0);
         }
+        for ps in &mut self.palette_slices {
+            *ps = None;
+        }
+        self.palette_bases.fill(0);
+        self.palette_lens.fill(0);
         let gi = [GridInfo {
             resolution: self.voxel_resolution,
             dim_x: self.voxel_resolution,
