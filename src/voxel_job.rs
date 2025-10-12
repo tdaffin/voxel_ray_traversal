@@ -1,3 +1,4 @@
+use std::f32::consts::TAU;
 use std::sync::mpsc::{self, Receiver};
 use std::{
     sync::{
@@ -6,6 +7,8 @@ use std::{
     },
     thread,
 };
+
+use rand::Rng;
 
 use vulkano::buffer::Subbuffer;
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
@@ -24,13 +27,54 @@ use crate::{
     voxelize,
 };
 
-fn translation_to_mat4(translation: [f32; 3]) -> [[f32; 4]; 4] {
+fn identity_mat4() -> [[f32; 4]; 4] {
+    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+}
+
+fn compose_transform(rotation: [[f32; 4]; 4], translation: [f32; 3]) -> [[f32; 4]; 4] {
+    let mut mat = rotation;
+    mat[3][0] = translation[0];
+    mat[3][1] = translation[1];
+    mat[3][2] = translation[2];
+    mat
+}
+
+fn normalize3(v: [f32; 3]) -> [f32; 3] {
+    let len_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+    if len_sq <= f32::EPSILON {
+        [0.0, 0.0, 1.0]
+    } else {
+        let inv_len = len_sq.sqrt().recip();
+        [v[0] * inv_len, v[1] * inv_len, v[2] * inv_len]
+    }
+}
+
+fn rotation_from_axis_angle(axis: [f32; 3], angle: f32) -> [[f32; 4]; 4] {
+    let n = normalize3(axis);
+    let (x, y, z) = (n[0], n[1], n[2]);
+    let cos = angle.cos();
+    let sin = angle.sin();
+    let one_minus = 1.0 - cos;
     [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [translation[0], translation[1], translation[2], 1.0],
+        [one_minus * x * x + cos, one_minus * x * y - sin * z, one_minus * x * z + sin * y, 0.0],
+        [one_minus * x * y + sin * z, one_minus * y * y + cos, one_minus * y * z - sin * x, 0.0],
+        [one_minus * x * z - sin * y, one_minus * y * z + sin * x, one_minus * z * z + cos, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
     ]
+}
+
+fn random_rotation_matrix<R: Rng + ?Sized>(rng: &mut R) -> [[f32; 4]; 4] {
+    // Marsaglia method for random unit vector
+    let u: f32 = rng.gen_range(-1.0..=1.0);
+    let theta: f32 = rng.gen_range(0.0..TAU);
+    let sqrt_term = (1.0 - u * u).max(0.0).sqrt();
+    let axis = [sqrt_term * theta.cos(), sqrt_term * theta.sin(), u];
+    let angle: f32 = rng.gen_range(0.0..TAU);
+    rotation_from_axis_angle(axis, angle)
+}
+
+fn translation_to_mat4(translation: [f32; 3]) -> [[f32; 4]; 4] {
+    compose_transform(identity_mat4(), translation)
 }
 
 #[derive(Debug)]
@@ -72,6 +116,7 @@ pub struct VoxelManager {
     pub grid_resolutions: Vec<u32>,
     pub grid_dims: Vec<(u32, u32, u32)>,
     pub grid_storage: Vec<(u32, u32, u32)>, // (storage_w, storage_h, storage_d)
+    pub grid_user_transforms: Vec<[[f32; 4]; 4]>,
     pub future_grid_resolutions: Vec<u32>,
     pub active_voxel_grids: u32,
 
@@ -110,6 +155,7 @@ impl VoxelManager {
                 (initial_resolution / 4, initial_resolution / 4, initial_resolution / 8);
                 model_count
             ];
+        let grid_user_transforms = vec![identity_mat4(); model_count];
         let future_grid_resolutions = grid_resolutions.clone();
         let placeholder_view = create_empty_voxel_placeholder(
             memory_allocator.clone(),
@@ -269,6 +315,7 @@ impl VoxelManager {
             grid_resolutions,
             grid_dims,
             grid_storage,
+            grid_user_transforms,
             future_grid_resolutions,
             active_voxel_grids,
             voxel_views,
@@ -293,6 +340,7 @@ impl VoxelManager {
         render_pipeline: &HotReloadComputePipeline, memory_allocator: Arc<StandardMemoryAllocator>,
         command_buffer_allocator: Arc<StandardCommandBufferAllocator>, queue: Arc<Queue>,
     ) {
+        let mut dirty = false;
         while let Ok(msg) = self.voxel_result_rx.try_recv() {
             match msg {
                 VoxelJobMessage::Progress { generation, index, done, total } => {
@@ -354,6 +402,7 @@ impl VoxelManager {
                         // NOTE: For .vox models, palette slice isn't yet copied into palette buffer.
                         // palette slice (if any) applied separately via PaletteSlice message
                         // TODO Step8: store per-grid palette_base/len in parallel vectors, update later
+                        dirty = true;
                     }
                 }
                 VoxelJobMessage::PaletteSlice { generation, index, colors } => {
@@ -362,6 +411,7 @@ impl VoxelManager {
                     }
                     if index < self.palette_slices.len() {
                         self.palette_slices[index] = Some(colors);
+                        dirty = true;
                     }
                 }
                 VoxelJobMessage::Cancelled { generation } => {
@@ -370,136 +420,173 @@ impl VoxelManager {
                     }
                     if self.cancel_requested {
                         self.voxel_pending.fill(false);
+                        dirty = true;
                     }
                 }
-            }
-            // Rebuild descriptor set including ANY ready grids (relax contiguous requirement).
-            let mut ready: Vec<Arc<ImageView>> = Vec::new();
-            let mut ready_colors: Vec<Arc<ImageView>> = Vec::new();
-            for i in 0..self.voxel_views.len() {
-                if let (Some(v), Some(cv)) = (&self.voxel_views[i], &self.color_index_views[i]) {
-                    ready.push(v.clone());
-                    ready_colors.push(cv.clone());
-                }
-            }
-            self.active_voxel_grids = ready.len() as u32;
-            if self.active_voxel_grids > 0 {
-                // Build grid info array with precomputed origins.
-                // Use actual content width (dim_x) for spacing instead of padded storage resolution.
-                // Refined heuristic:
-                // 1. Compute approximate total area (dx*dy) and target row width ~= sqrt(total_area) * k
-                // 2. Greedy pack grids into rows until adding next would exceed target, then wrap.
-                // 3. Within a row, lay out left-to-right with padding factor P.
-                const PADDING: f32 = 0.10; // 10% spacing (reduced from 25%)
-                let mut dims_ready: Vec<(usize, u32, u32, u32, u32)> = Vec::new();
-                let mut total_area: f64 = 0.0;
-                for (i, _view) in ready.iter().enumerate() {
-                    let res =
-                        self.grid_resolutions.get(i).copied().unwrap_or(self.voxel_resolution);
-                    let (dx, dy, dz) = self.grid_dims.get(i).copied().unwrap_or((res, res, res));
-                    total_area += (dx.max(1) * dy.max(1)) as f64;
-                    dims_ready.push((i, res, dx, dy, dz));
-                }
-                // Sort by descending height to improve packing (tallest-first skyline approximation)
-                dims_ready.sort_by_key(|&(_, _, _dx, dy, _)| std::cmp::Reverse(dy));
-                let target_row_width = (total_area.sqrt() as f32).max(1.0);
-                let mut infos: Vec<GridInfo> = vec![GridInfo::default(); dims_ready.len()];
-                let mut row_y = 0.0f32;
-                let mut cursor = 0.0f32; // projected row width accumulator
-                let mut current_row: Vec<(usize, u32, u32, u32, u32)> = Vec::new();
-                let place_row = |row: &Vec<(usize, u32, u32, u32, u32)>,
-                                 base_y: f32,
-                                 infos: &mut [GridInfo]| {
-                    let mut x = 0.0f32;
-                    let mut max_h = 0.0f32;
-                    for &(orig_index, res, dx, dy, dz) in row.iter() {
-                        let (storage_w, storage_h, storage_d) = self
-                            .grid_storage
-                            .get(orig_index)
-                            .copied()
-                            .unwrap_or((res / 4, res / 4, res / 8));
-                        infos[orig_index] = GridInfo {
-                            resolution: res,
-                            dim_x: dx,
-                            dim_y: dy,
-                            dim_z: dz,
-                            storage_w,
-                            storage_h,
-                            storage_d,
-                            palette_base: 0,
-                            palette_len: 256,
-                            grid_to_world: translation_to_mat4([x, base_y, 0.0]),
-                            ..GridInfo::default()
-                        };
-                        x += dx as f32 * (1.0 + PADDING);
-                        max_h = max_h.max(dy as f32 * (1.0 + PADDING));
-                    }
-                    max_h
-                };
-                for entry in dims_ready.into_iter() {
-                    let (_, _res, dx, _dy, _dz) = entry;
-                    let projected = if current_row.is_empty() {
-                        dx as f32
-                    } else {
-                        cursor + dx as f32 * (1.0 + PADDING)
-                    };
-                    if !current_row.is_empty() && projected > target_row_width * 1.25 {
-                        // allow some slack
-                        // flush row
-                        let used_h = place_row(&current_row, row_y, &mut infos);
-                        row_y += used_h;
-                        current_row.clear();
-                        // cursor reset not needed; will be set below for first element of new row
-                    }
-                    cursor = if current_row.is_empty() {
-                        dx as f32 * (1.0 + PADDING)
-                    } else {
-                        projected
-                    };
-                    current_row.push(entry);
-                }
-                if !current_row.is_empty() {
-                    let _ = place_row(&current_row, row_y, &mut infos);
-                }
-                // If all grids are ready and we have palette slices for each, perform compaction.
-                let all_ready = self.voxel_pending.iter().all(|p| !*p)
-                    && self.palette_slices.iter().all(|s| s.is_some());
-                if all_ready {
-                    // Build compact palette by concatenation; assign bases.
-                    let mut compact: Vec<[f32; 4]> = Vec::new();
-                    for (i, slice_opt) in self.palette_slices.iter().enumerate() {
-                        if let Some(slice) = slice_opt {
-                            self.palette_bases[i] = compact.len() as u32;
-                            self.palette_lens[i] = slice.len() as u32;
-                            compact.extend_from_slice(slice);
-                        } else {
-                            self.palette_bases[i] = 0;
-                            self.palette_lens[i] = 0;
-                        }
-                    }
-                    if compact.is_empty() {
-                        compact.push([1.0, 1.0, 1.0, 1.0]);
-                    }
-                    // Recreate palette buffer with compact data
-                    self.palette_buffer =
-                        crate::voxel::create_palette_buffer(memory_allocator.clone(), &compact);
-                    // Update infos with palette base/len
-                    for (i, gi) in infos.iter_mut().enumerate() {
-                        gi.palette_base = self.palette_bases.get(i).copied().unwrap_or(0);
-                        gi.palette_len = self.palette_lens.get(i).copied().unwrap_or(0);
-                    }
-                }
-                let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &infos);
-                self.voxel_set = build_voxel_descriptor_set(
-                    descriptor_set_allocator.clone(),
-                    render_pipeline,
-                    &ready,
-                    &ready_colors,
-                    self.palette_buffer.clone(),
-                    grid_info_buffer,
-                );
             }
         }
+        if dirty {
+            self.rebuild_descriptor_set(
+                descriptor_set_allocator,
+                render_pipeline,
+                memory_allocator,
+            );
+        }
+    }
+
+    fn ensure_transform_capacity(&mut self) {
+        if self.grid_user_transforms.len() < self.models.len() {
+            let needed = self.models.len() - self.grid_user_transforms.len();
+            self.grid_user_transforms.extend((0..needed).map(|_| identity_mat4()));
+        }
+    }
+
+    fn place_row(
+        &self, row: &[(usize, usize, u32, u32, u32, u32)], base_y: f32, padding: f32,
+        infos: &mut [GridInfo],
+    ) -> f32 {
+        let mut x = 0.0f32;
+        let mut max_h = 0.0f32;
+        for &(descriptor_idx, orig_index, res, dx, dy, dz) in row.iter() {
+            let (storage_w, storage_h, storage_d) =
+                self.grid_storage.get(orig_index).copied().unwrap_or((res / 4, res / 4, res / 8));
+            let rotation =
+                self.grid_user_transforms.get(orig_index).cloned().unwrap_or_else(identity_mat4);
+            let transform = compose_transform(rotation, [x, base_y, 0.0]);
+            infos[descriptor_idx] = GridInfo {
+                resolution: res,
+                dim_x: dx,
+                dim_y: dy,
+                dim_z: dz,
+                storage_w,
+                storage_h,
+                storage_d,
+                palette_base: 0,
+                palette_len: 0,
+                grid_to_world: transform,
+                ..GridInfo::default()
+            };
+            x += dx as f32 * (1.0 + padding);
+            max_h = max_h.max(dy as f32 * (1.0 + padding));
+        }
+        max_h
+    }
+
+    fn rebuild_descriptor_set(
+        &mut self, descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+        render_pipeline: &HotReloadComputePipeline, memory_allocator: Arc<StandardMemoryAllocator>,
+    ) {
+        let mut ready: Vec<Arc<ImageView>> = Vec::new();
+        let mut ready_colors: Vec<Arc<ImageView>> = Vec::new();
+        let mut ready_indices: Vec<usize> = Vec::new();
+        for (idx, (voxel_opt, color_opt)) in
+            self.voxel_views.iter().zip(self.color_index_views.iter()).enumerate()
+        {
+            if let (Some(v), Some(cv)) = (voxel_opt, color_opt) {
+                ready.push(v.clone());
+                ready_colors.push(cv.clone());
+                ready_indices.push(idx);
+            }
+        }
+
+        self.active_voxel_grids = ready.len() as u32;
+        if self.active_voxel_grids == 0 {
+            return;
+        }
+
+        self.ensure_transform_capacity();
+
+        const PADDING: f32 = 0.10;
+        let mut dims_ready: Vec<(usize, usize, u32, u32, u32, u32)> = Vec::new();
+        let mut total_area: f64 = 0.0;
+        for (descriptor_idx, &orig_index) in ready_indices.iter().enumerate() {
+            let res =
+                self.grid_resolutions.get(orig_index).copied().unwrap_or(self.voxel_resolution);
+            let (dx, dy, dz) = self.grid_dims.get(orig_index).copied().unwrap_or((res, res, res));
+            total_area += (dx.max(1) * dy.max(1)) as f64;
+            dims_ready.push((descriptor_idx, orig_index, res, dx, dy, dz));
+        }
+
+        dims_ready.sort_by_key(|&(_, _, _, _, dy, _)| std::cmp::Reverse(dy));
+
+        let target_row_width = (total_area.sqrt() as f32).max(1.0);
+        let mut infos: Vec<GridInfo> = vec![GridInfo::default(); ready.len()];
+        let mut row_y = 0.0f32;
+        let mut cursor = 0.0f32;
+        let mut current_row: Vec<(usize, usize, u32, u32, u32, u32)> = Vec::new();
+
+        for entry in dims_ready.into_iter() {
+            let (_, _, _, dx, _, _) = entry;
+            let projected = if current_row.is_empty() {
+                dx as f32
+            } else {
+                cursor + dx as f32 * (1.0 + PADDING)
+            };
+            if !current_row.is_empty() && projected > target_row_width * 1.25 {
+                let used_h = self.place_row(&current_row, row_y, PADDING, &mut infos);
+                row_y += used_h;
+                current_row.clear();
+            }
+            cursor = if current_row.is_empty() { dx as f32 * (1.0 + PADDING) } else { projected };
+            current_row.push(entry);
+        }
+        if !current_row.is_empty() {
+            let _ = self.place_row(&current_row, row_y, PADDING, &mut infos);
+        }
+
+        let all_ready = self.voxel_pending.iter().all(|p| !*p)
+            && self.palette_slices.iter().all(|s| s.is_some());
+        if all_ready {
+            let mut compact: Vec<[f32; 4]> = Vec::new();
+            for (i, slice_opt) in self.palette_slices.iter().enumerate() {
+                if let Some(slice) = slice_opt {
+                    self.palette_bases[i] = compact.len() as u32;
+                    self.palette_lens[i] = slice.len() as u32;
+                    compact.extend_from_slice(slice);
+                } else {
+                    self.palette_bases[i] = 0;
+                    self.palette_lens[i] = 0;
+                }
+            }
+            if compact.is_empty() {
+                compact.push([1.0, 1.0, 1.0, 1.0]);
+            }
+            self.palette_buffer =
+                crate::voxel::create_palette_buffer(memory_allocator.clone(), &compact);
+        }
+
+        for (descriptor_idx, &orig_index) in ready_indices.iter().enumerate() {
+            infos[descriptor_idx].palette_base =
+                self.palette_bases.get(orig_index).copied().unwrap_or(0);
+            infos[descriptor_idx].palette_len =
+                self.palette_lens.get(orig_index).copied().unwrap_or(0);
+        }
+
+        let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &infos);
+        self.voxel_set = build_voxel_descriptor_set(
+            descriptor_set_allocator,
+            render_pipeline,
+            &ready,
+            &ready_colors,
+            self.palette_buffer.clone(),
+            grid_info_buffer,
+        );
+    }
+
+    pub fn apply_random_rotation(
+        &mut self, index: usize, descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+        render_pipeline: &HotReloadComputePipeline, memory_allocator: Arc<StandardMemoryAllocator>,
+    ) {
+        if index >= self.models.len() {
+            return;
+        }
+        self.ensure_transform_capacity();
+        let mut rng = rand::thread_rng();
+        let rotation = random_rotation_matrix(&mut rng);
+        if index < self.grid_user_transforms.len() {
+            self.grid_user_transforms[index] = rotation;
+        }
+        self.rebuild_descriptor_set(descriptor_set_allocator, render_pipeline, memory_allocator);
     }
 
     pub fn cancel(&mut self) {

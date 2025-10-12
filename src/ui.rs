@@ -142,8 +142,9 @@ impl App {
                             }
                         }
                         ui.label("Discovered Models:");
-                        for (i, m) in self.voxel.manager.models.iter().enumerate() {
-                            // Fetch actual dimensions if available
+                        let model_count = self.voxel.manager.models.len();
+                        for i in 0..model_count {
+                            let model = &self.voxel.manager.models[i];
                             let dims = self.voxel.manager.grid_dims.get(i).copied().unwrap_or((
                                 self.voxel.manager.grid_resolutions.get(i).copied().unwrap_or(0),
                                 0,
@@ -162,10 +163,20 @@ impl App {
                             } else {
                                 String::new()
                             };
-                            ui.label(format!(
-                                "{}: {} (.{}) dims={}{}",
-                                i, m.name, m.extension, dim_str, storage_note
-                            ));
+                            let label_text = format!(
+                                "{}: {} (.{} ) dims={}{}",
+                                i, model.name, model.extension, dim_str, storage_note
+                            );
+                            ui.horizontal(|ui| {
+                                ui.label(&label_text);
+                                if ui
+                                    .button(format!("Random rotation##{}", i))
+                                    .on_hover_text("Apply a fresh random orientation to this grid")
+                                    .clicked()
+                                {
+                                    self.voxel.randomize_rotation(i, &self.pipelines.render);
+                                }
+                            });
                         }
                         if ui.button("Regenerate Grids").clicked() {
                             request_regen_voxels = true;

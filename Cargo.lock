@@ -3000,6 +3000,7 @@ dependencies = [
  "nalgebra",
  "notify",
  "ply-rs",
+ "rand",
  "rayon",
  "shaderc",
  "vulkano",

@@ -65,6 +65,15 @@ impl VoxelSystem {
             placeholder_resolution,
         );
     }
+
+    pub fn randomize_rotation(&mut self, index: usize, render_pipeline: &HotReloadComputePipeline) {
+        self.manager.apply_random_rotation(
+            index,
+            self.descriptor_set_allocator.clone(),
+            render_pipeline,
+            self.memory_allocator.clone(),
+        );
+    }
 }
 
 impl std::ops::Deref for VoxelSystem {
