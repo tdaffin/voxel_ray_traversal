@@ -80,9 +80,7 @@ pub fn vox_to_voxels(
         let bit = (x % 4) * 32 + (y % 4) + (z % 8) * 4;
         voxels[texel] |= 1u128 << bit;
         let orig = v.i as usize; // 0..255
-        let mapped_local = if orig == 0 {
-            0
-        } else if remap_assigned[orig] {
+        let mapped_local = if remap_assigned[orig] {
             remap[orig]
         } else if used_colors.len() < max_colors {
             let pal = palette_rgba[orig];
@@ -137,4 +135,25 @@ pub fn vox_to_voxels(
         storage_h,
         storage_d,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dot_vox::load as load_vox;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    #[test]
+    fn splodge_palette_contains_five_colors() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/splodge.vox");
+        let result =
+            vox_to_voxels(&path, None, u8::MAX).expect("splodge.vox should load successfully");
+        let scene = load_vox(path.to_str().unwrap()).expect("dot_vox load should succeed");
+        let raw_unique: HashSet<u8> =
+            scene.models.get(0).expect("model 0 should exist").voxels.iter().map(|v| v.i).collect();
+        println!("raw unique indices: {:?}", raw_unique);
+        assert_eq!(raw_unique.len(), 5, "expected raw vox data to use five colors");
+        assert_eq!(result.palette.len(), 5, "expected splodge.vox to contain five palette colors");
+    }
 }
