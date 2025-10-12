@@ -9,6 +9,8 @@ use std::{
 };
 
 use rand::Rng;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 
 use vulkano::buffer::Subbuffer;
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
@@ -75,6 +77,16 @@ fn random_rotation_matrix<R: Rng + ?Sized>(rng: &mut R) -> [[f32; 4]; 4] {
 
 fn translation_to_mat4(translation: [f32; 3]) -> [[f32; 4]; 4] {
     compose_transform(identity_mat4(), translation)
+}
+
+fn seeded_rng_for_path(path: &std::path::Path) -> ChaCha8Rng {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let seed = hasher.finish();
+    let mut seed_bytes = [0u8; 32];
+    seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
+    ChaCha8Rng::from_seed(seed_bytes)
 }
 
 #[derive(Debug)]
@@ -263,7 +275,7 @@ impl VoxelManager {
                         let (dx, dy, dz) = logical;
                         let color_count = dx as usize * dy as usize * dz as usize;
                         let colors = vec![0u8; color_count];
-                        let mut rng = rand::thread_rng();
+                        let mut rng = seeded_rng_for_path(&path);
                         let palette_color = [
                             rng.gen_range(0.0..1.0),
                             rng.gen_range(0.0..1.0),
@@ -745,7 +757,7 @@ impl VoxelManager {
                         let (dim_x, dim_y, dim_z) = logical;
                         let color_count = dim_x as usize * dim_y as usize * dim_z as usize;
                         let colors = vec![0u8; color_count];
-                        let mut rng = rand::thread_rng();
+                        let mut rng = seeded_rng_for_path(&path);
                         let palette_slice = vec![[
                             rng.gen_range(0.0..1.0),
                             rng.gen_range(0.0..1.0),

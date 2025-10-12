@@ -3001,6 +3001,7 @@ dependencies = [
  "notify",
  "ply-rs",
  "rand",
+ "rand_chacha",
  "rayon",
  "shaderc",
  "vulkano",
