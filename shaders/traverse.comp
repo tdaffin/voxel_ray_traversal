@@ -1,6 +1,10 @@
 #version 460
 #extension GL_EXT_nonuniform_qualifier : require
 
+#ifndef DEBUG_WEDGE
+#define DEBUG_WEDGE 1
+#endif
+
 // Render modes: MUST stay in sync with the Rust RenderMode enum (search for RenderMode in main.rs or related file)
 const uint COORD = 0;
 const uint STEPS = 1;
@@ -66,108 +70,158 @@ vec3 stepsToInferno(uint steps, uint start, uint end) {
     return inferno(clamp(t, 0, 1));
 }
 
-bool readVoxel(uvec3 coord, inout uvec4 texel, inout ivec3 texel_coord, int gridIndex) {
-    // Uses per-grid storage block dimensions (4x4x8 voxels per texel) independent of cubic "resolution".
-    ivec3 new_texel_coord = ivec3(coord.x / 4, coord.y / 4, coord.z / 8);
+bool readVoxel(ivec3 coord, inout uvec4 texel, inout ivec3 texel_coord, int gridIndex, ivec3 dims) {
+    if (coord.x < 0 || coord.y < 0 || coord.z < 0 || coord.x >= dims.x || coord.y >= dims.y || coord.z >= dims.z)
+        return false;
+    ivec3 new_texel_coord = ivec3(coord.x >> 2, coord.y >> 2, coord.z >> 3);
     if (new_texel_coord != texel_coord) {
         texel_coord = new_texel_coord;
         texel = imageLoad(voxelImages[gridIndex], texel_coord);
     }
-    return bool(texel[coord.x % 4] >> ((coord.y % 4) + (coord.z % 8) * 4) & 1u);
+    uint bitIndex = uint((coord.y & 3) + ((coord.z & 7) << 2));
+    uint mask = 1u << bitIndex;
+    return (texel[coord.x & 3] & mask) != 0u;
 }
 
 const float FLT_MAX = 3.4028235e+38;
 
-bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, out vec3 color, inout uint steps) {
-    vec3 inv_dir = 1. / dir;
-    vec3 sgn_dir = sign(inv_dir);
-    inv_dir = clamp(inv_dir, vec3(-FLT_MAX), vec3(FLT_MAX));
+bool traversal(
+    int gridIndex,
+    vec3 origin,
+    vec3 dir,
+    uvec3 dims,
+    out vec3 color,
+    out uint steps,
+    out float hitParam
+) {
+    const float VOXEL_EPS = 1e-3;
+    const float DIR_EPS = 1e-6;
+    ivec3 dimsI = ivec3(dims);
 
-    vec3 t1 = -origin * inv_dir;
-    vec3 t2 = (vec3(dims) - origin) * inv_dir;
+    vec3 bounds_min = vec3(0.0);
+    vec3 bounds_max = vec3(dims);
 
-    vec3 tmins = min(t1, t2);
-    vec3 tmaxs = max(t1, t2);
-
-    float tmin = 0;
+    float tmin = 0.0;
     float tmax = FLT_MAX;
-    for (int i = 0; i < 3; i++) {
-        tmin = max(tmin, tmins[i]);
-        tmax = min(tmax, tmaxs[i]);
-    }
+    vec3 inv_dir = vec3(0.0);
+    vec3 sgn_dir = vec3(0.0);
+    int entryAxis = 0;
+    float entryAxisValue = -FLT_MAX;
 
-    if (tmin > tmax) {
-        return false;
-    }
-
-    uint stepped_axis = 0u;
-    float stepped_t = tmins.x;
-    if (tmins.y > stepped_t) {
-        stepped_axis = 1u;
-        stepped_t = tmins.y;
-    }
-    if (tmins.z > stepped_t) {
-        stepped_axis = 2u;
-        stepped_t = tmins.z;
-    }
-
-    origin += dir * tmin;
-    uvec3 coord = uvec3(clamp(floor(origin), vec3(0), vec3(vec3(dims) - 1.0)));
-    vec3 t = (coord + 0.5 * (1 + sgn_dir) - origin) * inv_dir;
-
-    uvec3 ustep = uvec3(ivec3(sgn_dir));
-    vec3 delta = inv_dir * sgn_dir;
-
-    ivec3 texel_coord = ivec3(coord.x / 4, coord.y / 4, coord.z / 8);
-    uvec4 texel = imageLoad(voxelImages[gridIndex], texel_coord);
-    bool instantHit = bool(texel[coord.x % 4] >> ((coord.y % 4) + (coord.z % 8) * 4) & 1u);
-    if (!instantHit)
-    while (true) {
-        steps++;
-        #ifndef BRANCHLESS_TRAVERSAL
-            if (t.x < t.y) {
-                if (t.x < t.z) {
-                    coord.x += ustep.x;
-                    t.x += delta.x;
-                    stepped_axis = 0;
-                } else {
-                    coord.z += ustep.z;
-                    t.z += delta.z;
-                    stepped_axis = 2;
-                }
-            } else {
-                if (t.y < t.z) {
-                    coord.y += ustep.y;
-                    t.y += delta.y;
-                    stepped_axis = 1;
-                } else {
-                    coord.z += ustep.z;
-                    t.z += delta.z;
-                    stepped_axis = 2;
-                }
+    for (int axis = 0; axis < 3; ++axis) {
+        float d = dir[axis];
+        if (abs(d) < DIR_EPS) {
+            if (origin[axis] < bounds_min[axis] || origin[axis] > bounds_max[axis]) {
+                steps = 0;
+                hitParam = FLT_MAX;
+                return false;
             }
-        #else
-            // Branchless variant: compute mask selecting axis to advance.
-            uvec3 mask = uvec3(
-                (t.x < t.y && t.x < t.z) ? 1u : 0u,
-                (t.x >= t.y && t.y < t.z) ? 1u : 0u,
-                (t.x >= t.z && t.y >= t.z) ? 1u : 0u
-            );
-            coord += ustep * mask;
-            t += delta * mask;
-            stepped_axis = (mask.x != 0u) ? 0u : ((mask.y != 0u) ? 1u : 2u);
-        #endif
+            inv_dir[axis] = 0.0;
+            sgn_dir[axis] = 0.0;
+            continue;
+        }
 
-        if (any(greaterThanEqual(coord, dims)))
-        return false;
-        if (readVoxel(coord, texel, texel_coord, gridIndex))
-        break;
+    float inv = 1.0 / d;
+    inv_dir[axis] = inv;
+    sgn_dir[axis] = (d > 0.0) ? 1.0 : -1.0;
+
+    float expandMin = (d > 0.0) ? -VOXEL_EPS : VOXEL_EPS;
+    float expandMax = (d > 0.0) ? VOXEL_EPS : -VOXEL_EPS;
+
+    float t1 = ((bounds_min[axis] + expandMin) - origin[axis]) * inv;
+    float t2 = ((bounds_max[axis] + expandMax) - origin[axis]) * inv;
+        float axisMin = min(t1, t2);
+        float axisMax = max(t1, t2);
+
+        if (axisMin > entryAxisValue) {
+            entryAxisValue = axisMin;
+            entryAxis = axis;
+        }
+
+        tmin = max(tmin, axisMin);
+        tmax = min(tmax, axisMax);
+        if (tmin > tmax) {
+            steps = 0;
+            hitParam = FLT_MAX;
+            return false;
+        }
     }
 
-    vec3 mask = vec3(0);
-    mask[stepped_axis] = 1;
-    float t_inside = dot(t, mask) - dot(delta, mask);
+    vec3 entryPoint = origin + dir * tmin;
+    entryPoint = clamp(entryPoint, vec3(0.0) + VOXEL_EPS, vec3(dims) - vec3(VOXEL_EPS));
+    origin = entryPoint;
+
+    vec3 travelOrigin = entryPoint + sgn_dir * VOXEL_EPS;
+    travelOrigin = clamp(travelOrigin, vec3(0.0) + VOXEL_EPS, vec3(dims) - vec3(VOXEL_EPS));
+    ivec3 coord = ivec3(clamp(floor(travelOrigin), vec3(0.0), vec3(vec3(dims) - 1.0)));
+
+    vec3 cellOffset = travelOrigin - vec3(coord);
+    vec3 absInvDir = abs(inv_dir);
+    vec3 tMax;
+    vec3 tDelta;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (sgn_dir[axis] > 0.0) {
+            tMax[axis] = (1.0 - cellOffset[axis]) * absInvDir[axis];
+            tDelta[axis] = absInvDir[axis];
+        } else if (sgn_dir[axis] < 0.0) {
+            tMax[axis] = cellOffset[axis] * absInvDir[axis];
+            tDelta[axis] = absInvDir[axis];
+        } else {
+            tMax[axis] = FLT_MAX;
+            tDelta[axis] = FLT_MAX;
+        }
+    }
+
+    ivec3 istep = ivec3(round(sgn_dir));
+
+    ivec3 texel_coord = ivec3(-1);
+    uvec4 texel = uvec4(0u);
+    bool occupied = readVoxel(coord, texel, texel_coord, gridIndex, dimsI);
+    uint traversed = 0u;
+    uint stepped_axis = uint(entryAxis);
+    float localTravel = 0.0;
+
+    if (!occupied) {
+        while (true) {
+            int axis;
+            if (tMax.x < tMax.y) {
+                axis = (tMax.x < tMax.z) ? 0 : 2;
+            } else {
+                axis = (tMax.y < tMax.z) ? 1 : 2;
+            }
+
+            localTravel = tMax[axis];
+            tMax[axis] += tDelta[axis];
+            coord[axis] += istep[axis];
+            traversed++;
+            stepped_axis = uint(axis);
+
+            if (coord.x < 0 || coord.y < 0 || coord.z < 0 ||
+                coord.x >= dimsI.x || coord.y >= dimsI.y || coord.z >= dimsI.z) {
+                steps = 0;
+                hitParam = FLT_MAX;
+                return false;
+            }
+
+            if (readVoxel(coord, texel, texel_coord, gridIndex, dimsI)) {
+                occupied = true;
+                break;
+            }
+        }
+    }
+
+    if (!occupied) {
+        steps = 0;
+        hitParam = FLT_MAX;
+        return false;
+    }
+
+    float t_inside = (traversed == 0u) ? 0.0 : localTravel;
+    vec3 mask = vec3(0.0);
+    mask[stepped_axis] = 1.0;
     vec3 localNormal = -mask * sgn_dir;
+    hitParam = tmin + t_inside;
+    steps = traversed + 1u;
 
     switch (pc.render_mode) {
         case COORD:
@@ -224,11 +278,15 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, out vec3 color,
 
                 // Approximate AO: sample neighbor voxels around the neighbor cell in directions perpendicular to the step direction.
                 // Determine neighbor cell (nbr) one step forward along stepped axis inside the voxel grid if valid.
-                uvec3 base_coord = coord; // impact voxel
-                uvec3 nbr = coord;
-                if (stepped_axis == 0) nbr.x = min(nbr.x + (uint(sgn_dir.x > 0.0)), dims.x - 1);
-                if (stepped_axis == 1) nbr.y = min(nbr.y + (uint(sgn_dir.y > 0.0)), dims.y - 1);
-                if (stepped_axis == 2) nbr.z = min(nbr.z + (uint(sgn_dir.z > 0.0)), dims.z - 1);
+                ivec3 base_coord = coord;
+                ivec3 nbr = coord;
+                int stepSign[3] = int[3](0, 0, 0);
+                stepSign[0] = (sgn_dir.x > 0.0) ? 1 : ((sgn_dir.x < 0.0) ? -1 : 0);
+                stepSign[1] = (sgn_dir.y > 0.0) ? 1 : ((sgn_dir.y < 0.0) ? -1 : 0);
+                stepSign[2] = (sgn_dir.z > 0.0) ? 1 : ((sgn_dir.z < 0.0) ? -1 : 0);
+                if (stepped_axis == 0) nbr.x = clamp(nbr.x + stepSign[0], 0, dimsI.x - 1);
+                if (stepped_axis == 1) nbr.y = clamp(nbr.y + stepSign[1], 0, dimsI.y - 1);
+                if (stepped_axis == 2) nbr.z = clamp(nbr.z + stepSign[2], 0, dimsI.z - 1);
 
                 // Direction vector dir = nbr - base in integer space:
                 ivec3 idir = ivec3(nbr) - ivec3(base_coord);
@@ -250,10 +308,8 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, out vec3 color,
                         if (p.x < 0 || p.y < 0 || p.z < 0 || p.x >= int(dims.x) || p.y >= int(dims.y) || p.z >= int(dims.z))
                             continue;
                         // Read occupancy (reuse helper logic):
-                        uvec3 q = uvec3(p);
-                        // We need a fresh texel cache for arbitrary coords:
                         uvec4 texAO; ivec3 texAOcoord = ivec3(-1);
-                        if (readVoxel(q, texAO, texAOcoord, gridIndex)) {
+                        if (readVoxel(p, texAO, texAOcoord, gridIndex, dimsI)) {
                             occ++;
                         }
                         probes++;
@@ -290,6 +346,8 @@ void main() {
 
     vec3 ro = pc.pixelToRay[3].xyz;
     vec3 rd = mat3(pc.pixelToRay) * vec3(pixelCoord, 1);
+    float rdLen = length(rd);
+    vec3 rdNorm = (rdLen > 0.0) ? rd / rdLen : vec3(0.0);
 
     uint gridCount = pc.voxel_count;
     // Precompute per-grid local ray representations using the provided transforms.
@@ -339,32 +397,114 @@ void main() {
             }
         }
     }
-    vec3 color = vec3(0);
-    uint steps = 0;
-    uint last_size = 0;
-    bool hit = false;
-    for (int order = 0; order < int(gridCount) && !hit; ++order) {
+    vec3 bestColor = vec3(0.0);
+    float bestWorldParam = FLT_MAX;
+    uint bestSteps = 0;
+    uint cumulativeSteps = 0;
+    uint bestSize = 0;
+    uint lastVisitedSize = 1u;
+    int bestGridIdx = -1;
+    float bestDepthRatio = 0.0;
+
+    for (int order = 0; order < int(gridCount); ++order) {
         int gridIdx = gridOrder[order];
         if (gridIdx < 0) continue;
         if (tEnter[gridIdx] == FLT_MAX) continue; // no intersection
         uvec3 dims = uvec3(gridInfos[gridIdx].dimX, gridInfos[gridIdx].dimY, gridInfos[gridIdx].dimZ);
         uint size = max(dims.x, max(dims.y, dims.z));
-        last_size = size;
+        lastVisitedSize = size;
         vec3 localOrigin = localOrigins[gridIdx];
         vec3 localDir = localDirections[gridIdx];
-        if (traversal(gridIdx, localOrigin, localDir, dims, color, steps)) {
-            hit = true;
-            if (pc.render_mode != STEPS) {
-                imageStore(targetImage, pixelCoord, vec4(color, 1));
+        vec3 gridColor;
+        uint gridSteps = 0u;
+        float gridHitParam = FLT_MAX;
+        bool gridHit = traversal(gridIdx, localOrigin, localDir, dims, gridColor, gridSteps, gridHitParam);
+        uint newCumulative = cumulativeSteps + gridSteps;
+        cumulativeSteps = newCumulative;
+        if (gridHit) {
+            vec3 localHit = localOrigin + localDir * gridHitParam;
+            vec3 worldHit = (gridInfos[gridIdx].gridToWorld * vec4(localHit, 1.0)).xyz;
+            float worldParam = dot(worldHit - ro, rdNorm);
+            if (worldParam >= -1e-4 && worldParam < bestWorldParam) {
+                bestWorldParam = worldParam;
+                bestColor = gridColor;
+                bestSteps = newCumulative;
+                bestSize = size;
+                bestGridIdx = gridIdx;
+                float denom = max(tExit[gridIdx] - tEnter[gridIdx], 1e-6);
+                bestDepthRatio = clamp((gridHitParam - tEnter[gridIdx]) / denom, 0.0, 1.0);
+                if (bestDepthRatio > 0.98) {
+                    ivec3 finalCoord = ivec3(clamp(floor(localHit), vec3(0.0), vec3(vec3(dims) - 1.0)));
+                    ivec3 texcoord = ivec3(-1);
+                    uvec4 texsample = uvec4(0u);
+                    if (!readVoxel(finalCoord, texsample, texcoord, gridIdx, ivec3(dims))) {
+                        bestWorldParam = FLT_MAX;
+                        bestGridIdx = -1;
+                        bestSteps = cumulativeSteps;
+                        bestColor = vec3(0.0);
+                        continue;
+                    }
+                }
+                continue;
             }
-            if (pc.render_mode == STEPS)
-                renderSteps(pixelCoord, steps, size);
-        } else {
-            // traversal missed inside this grid volume; continue to next grid. steps already accumulated.
         }
     }
-    // If no hit, optionally visualize steps vs last grid size
-    if (steps > 0 && pc.render_mode == STEPS && gridCount > 0) {
-        renderSteps(pixelCoord, steps, last_size);
+    if (bestWorldParam == FLT_MAX && gridCount > 0) {
+        int groundIdx = int(gridCount) - 1;
+        uvec3 dims = uvec3(gridInfos[groundIdx].dimX, gridInfos[groundIdx].dimY, gridInfos[groundIdx].dimZ);
+        vec3 groundColor;
+        uint groundSteps = 0u;
+        float groundHitParam = FLT_MAX;
+        bool groundHit = traversal(groundIdx, localOrigins[groundIdx], localDirections[groundIdx], dims, groundColor, groundSteps, groundHitParam);
+        uint groundSize = max(dims.x, max(dims.y, dims.z));
+        lastVisitedSize = groundSize;
+        cumulativeSteps += groundSteps;
+        if (groundHit) {
+            vec3 localHit = localOrigins[groundIdx] + localDirections[groundIdx] * groundHitParam;
+            vec3 worldHit = (gridInfos[groundIdx].gridToWorld * vec4(localHit, 1.0)).xyz;
+            float worldParam = dot(worldHit - ro, rdNorm);
+            if (worldParam >= -1e-4 && worldParam < bestWorldParam) {
+                bestWorldParam = worldParam;
+                bestColor = groundColor;
+                bestSteps = cumulativeSteps;
+                bestSize = groundSize;
+                bestGridIdx = groundIdx;
+                float denom = max(tExit[groundIdx] - tEnter[groundIdx], 1e-6);
+                bestDepthRatio = clamp((groundHitParam - tEnter[groundIdx]) / denom, 0.0, 1.0);
+            }
+        }
+    }
+    if (bestWorldParam < FLT_MAX) {
+#if DEBUG_WEDGE
+        float idxNorm = (bestGridIdx >= 0) ? float(bestGridIdx) / float(max(int(gridCount), 1)) : 0.0;
+    float distNorm = bestDepthRatio;
+        float stepsNorm = clamp(float(bestSteps % 256u) / 255.0, 0.0, 1.0);
+        vec3 debugColor = vec3(idxNorm, distNorm, stepsNorm);
+        if (bestGridIdx >= 0) {
+            ivec3 dimsDbg = ivec3(gridInfos[bestGridIdx].dimX, gridInfos[bestGridIdx].dimY, gridInfos[bestGridIdx].dimZ);
+            ivec3 probe = clamp(ivec3(localOrigins[bestGridIdx]), ivec3(0), dimsDbg - ivec3(1));
+            probe = max(probe, ivec3(0));
+            uint idx = imageLoad(voxelColorIndices[bestGridIdx], probe).r;
+            uint base = gridInfos[bestGridIdx].paletteBase;
+            uint len = gridInfos[bestGridIdx].paletteLen;
+            if (len > 0) {
+                uint paletteIdx = base + min(idx, len - 1);
+                if (paletteIdx < palette.length()) {
+                    vec3 palColor = palette[paletteIdx].rgb;
+                    const float BLEND = 0.02;
+                    debugColor = mix(debugColor, palColor, BLEND);
+                }
+            }
+        }
+        imageStore(targetImage, pixelCoord, vec4(debugColor, 1));
+#else
+        if (pc.render_mode != STEPS) {
+            imageStore(targetImage, pixelCoord, vec4(bestColor, 1));
+        } else {
+            renderSteps(pixelCoord, bestSteps, bestSize);
+        }
+#endif
+    } else if (cumulativeSteps > 0 && pc.render_mode == STEPS && gridCount > 0) {
+        renderSteps(pixelCoord, cumulativeSteps, lastVisitedSize);
     }
 }
