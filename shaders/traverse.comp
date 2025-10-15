@@ -78,7 +78,10 @@ bool readVoxel(uvec3 coord, inout uvec4 texel, inout ivec3 texel_coord, int grid
 
 const float FLT_MAX = 3.4028235e+38;
 
-bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, out vec3 color, inout uint steps) {
+bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, vec3 rdNormWorld, out vec3 color, out float hitDistance, out uint stepsTaken) {
+    uint stepsLocal = 0u;
+    hitDistance = FLT_MAX;
+    stepsTaken = 0u;
     vec3 inv_dir = 1. / dir;
     vec3 sgn_dir = sign(inv_dir);
     inv_dir = clamp(inv_dir, vec3(-FLT_MAX), vec3(FLT_MAX));
@@ -97,6 +100,7 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, out vec3 color,
     }
 
     if (tmin > tmax) {
+        stepsTaken = stepsLocal;
         return false;
     }
 
@@ -123,7 +127,7 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, out vec3 color,
     bool instantHit = bool(texel[coord.x % 4] >> ((coord.y % 4) + (coord.z % 8) * 4) & 1u);
     if (!instantHit)
     while (true) {
-        steps++;
+        stepsLocal++;
         #ifndef BRANCHLESS_TRAVERSAL
             if (t.x < t.y) {
                 if (t.x < t.z) {
@@ -158,8 +162,10 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, out vec3 color,
             stepped_axis = (mask.x != 0u) ? 0u : ((mask.y != 0u) ? 1u : 2u);
         #endif
 
-        if (any(greaterThanEqual(coord, dims)))
-        return false;
+        if (any(greaterThanEqual(coord, dims))) {
+            stepsTaken = stepsLocal;
+            return false;
+        }
         if (readVoxel(coord, texel, texel_coord, gridIndex))
         break;
     }
@@ -273,6 +279,10 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, out vec3 color,
             }
             break;
     }
+    vec3 localHit = origin + dir * t_inside;
+    vec3 hitWorld = (gridInfos[gridIndex].gridToWorld * vec4(localHit, 1.0)).xyz;
+    hitDistance = length(hitWorld - roWorld);
+    stepsTaken = stepsLocal;
     return true;
 }
 
@@ -290,6 +300,7 @@ void main() {
 
     vec3 ro = pc.pixelToRay[3].xyz;
     vec3 rd = mat3(pc.pixelToRay) * vec3(pixelCoord, 1);
+    vec3 rdNorm = normalize(rd);
 
     uint gridCount = pc.voxel_count;
     // Precompute per-grid local ray representations using the provided transforms.
@@ -339,11 +350,14 @@ void main() {
             }
         }
     }
-    vec3 color = vec3(0);
-    uint steps = 0;
-    uint last_size = 0;
-    bool hit = false;
-    for (int order = 0; order < int(gridCount) && !hit; ++order) {
+    vec3 bestColor = vec3(0);
+    float bestDistance = FLT_MAX;
+    uint totalSteps = 0u;
+    uint stepsToBest = 0u;
+    uint bestSize = 0u;
+    uint last_size = 0u;
+    bool hitFound = false;
+    for (int order = 0; order < int(gridCount); ++order) {
         int gridIdx = gridOrder[order];
         if (gridIdx < 0) continue;
         if (tEnter[gridIdx] == FLT_MAX) continue; // no intersection
@@ -352,19 +366,27 @@ void main() {
         last_size = size;
         vec3 localOrigin = localOrigins[gridIdx];
         vec3 localDir = localDirections[gridIdx];
-        if (traversal(gridIdx, localOrigin, localDir, dims, color, steps)) {
-            hit = true;
-            if (pc.render_mode != STEPS) {
-                imageStore(targetImage, pixelCoord, vec4(color, 1));
-            }
-            if (pc.render_mode == STEPS)
-                renderSteps(pixelCoord, steps, size);
-        } else {
-            // traversal missed inside this grid volume; continue to next grid. steps already accumulated.
+        vec3 candidateColor;
+        float candidateDistance;
+        uint stepsTaken;
+        bool hitThisGrid = traversal(gridIdx, localOrigin, localDir, dims, ro, rdNorm, candidateColor, candidateDistance, stepsTaken);
+        if (hitThisGrid && candidateDistance < bestDistance) {
+            bestDistance = candidateDistance;
+            bestColor = candidateColor;
+            bestSize = size;
+            stepsToBest = totalSteps + stepsTaken;
+            hitFound = true;
         }
+        totalSteps += stepsTaken;
     }
     // If no hit, optionally visualize steps vs last grid size
-    if (steps > 0 && pc.render_mode == STEPS && gridCount > 0) {
-        renderSteps(pixelCoord, steps, last_size);
+    if (hitFound) {
+        if (pc.render_mode != STEPS) {
+            imageStore(targetImage, pixelCoord, vec4(bestColor, 1));
+        } else {
+            renderSteps(pixelCoord, stepsToBest, bestSize);
+        }
+    } else if (totalSteps > 0u && pc.render_mode == STEPS && gridCount > 0u) {
+        renderSteps(pixelCoord, totalSteps, last_size);
     }
 }
