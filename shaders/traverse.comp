@@ -67,6 +67,8 @@ vec3 stepsToInferno(uint steps, uint start, uint end) {
     return inferno(clamp(t, 0, 1));
 }
 
+// Reads occupancy of a voxel cell by reusing a cached packed texel when possible.
+// Returns true if the voxel at `coord` is filled, updating `texel` and `texel_coord` if a new block is fetched.
 bool readVoxel(uvec3 coord, inout uvec4 texel, inout ivec3 texel_coord, int gridIndex) {
     // Uses per-grid storage block dimensions (4x4x8 voxels per texel) independent of cubic "resolution".
     ivec3 new_texel_coord = ivec3(coord.x / 4, coord.y / 4, coord.z / 8);
@@ -79,19 +81,22 @@ bool readVoxel(uvec3 coord, inout uvec4 texel, inout ivec3 texel_coord, int grid
 
 const float FLT_MAX = 3.4028235e+38;
 
+// Aggregate of data describing a voxel ray hit that downstream shading needs.
 struct HitAttributes {
-    uvec3 coord;
-    vec3 localNormal;
-    vec3 localHit;
-    uint steppedAxis;
-    float tmin;
-    float tInside;
-    vec3 sgnDir;
-    uvec3 dims;
-    vec3 localDir;
-    int gridIndex;
+    uvec3 coord;      // Integer coordinates of the voxel cell hit (in grid-local space).
+    vec3 localNormal; // Surface normal in grid-local space pointing against the ray advance.
+    vec3 localHit;    // Exact hit position in grid-local coordinates.
+    uint steppedAxis; // Axis index (0/1/2) representing which axis was last stepped when entering the voxel.
+    float tmin;       // Parametric distance from entry point into the grid to the start of traversal.
+    float tInside;    // Parametric distance traveled inside the voxel to reach the hit position.
+    vec3 sgnDir;      // Sign of the inverse ray direction used for stepping decisions per axis.
+    uvec3 dims;       // Dimensions of the voxel grid (number of cells along each axis).
+    vec3 localDir;    // Ray direction expressed in grid-local space.
+    int gridIndex;    // Index into `gridInfos` and associated buffers identifying the grid that was hit.
 };
 
+// Performs voxel traversal for a single grid, recording the first hit and gathering hit attributes.
+// Returns true when a solid voxel is encountered, writing the distance traveled, steps taken, and `HitAttributes`.
 bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, vec3 rdNormWorld,
     out float hitDistance, out uint stepsTaken, out HitAttributes outHit)
 {
@@ -218,6 +223,7 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     return true;
 }
 
+// Converts the gathered hit attributes into an RGB color according to the current render mode.
 vec3 calc_color(HitAttributes hit)
 {
     switch (pc.render_mode) {
@@ -310,6 +316,7 @@ vec3 calc_color(HitAttributes hit)
     return vec3(0.0);
 }
 
+// Visualizes the traversal step count using the inferno colormap, normalized by max grid dimension.
 void renderSteps(ivec2 pixelCoord, uint steps, uint maxDim) {
     vec3 color = stepsToInferno(steps, 0, max(1u, (maxDim - 1)) * 3);
     imageStore(targetImage, pixelCoord, vec4(color, 1));
@@ -319,6 +326,7 @@ const uint debugX = 180;
 const uint debugY = 86;
 const ivec2 debugCoord = ivec2(debugX, debugY);
 
+// Entry point for the compute shader: casts a ray per pixel, finds the nearest voxel hit, and shades it.
 void main() {
     ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
     ivec2 imageSize = imageSize(targetImage);
