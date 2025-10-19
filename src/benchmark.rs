@@ -31,6 +31,7 @@ pub struct BenchmarkContext<'a> {
     pub camera: &'a Camera,
     pub voxel: &'a VoxelManager,
     pub render_mode: u32,
+    pub always_instant: bool,
     pub branching_pipeline: Arc<ComputePipeline>,
     pub branchless_pipeline: Arc<ComputePipeline>,
     pub queue: Arc<vulkano::device::Queue>,
@@ -83,6 +84,7 @@ pub fn run(ctx: &mut BenchmarkContext) -> BenchmarkOutcome {
                 voxel: ctx.voxel,
                 render_mode: ctx.render_mode,
                 light_dir: [0.5, 0.8, 0.3],
+                always_instant: ctx.always_instant,
             });
             let mut builder = AutoCommandBufferBuilder::primary(
                 ctx.command_buffer_allocator.clone(),

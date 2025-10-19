@@ -31,6 +31,10 @@ impl App {
                             ui.selectable_value(&mut self.render_mode, mode, format!("{:?}", mode));
                         }
                     });
+                    ui.checkbox(&mut self.always_instant, "Full grids")
+                        .on_hover_text(
+                            "When enabled, grids register as a hit immediately upon entry.\nDisable to require sampling a filled bit first."
+                        );
                     ui.separator();
                     let max_grids = (self.voxel.manager.models.len() + 1).max(1) as u32;
                     ui.add(

@@ -21,6 +21,7 @@ pub struct RenderOutputs {
 pub fn record_frame(
     gpu: &GpuContext, pipelines: &PipelineManager, rcx: &RenderContext, voxel: &VoxelManager,
     camera: &mut Camera, render_mode: u32, image_index: u32, light_dir: [f32; 3],
+    always_instant: bool,
 ) -> RenderOutputs {
     let render_extent = rcx.render_image.extent();
     let resample_extent = rcx.resample_image.extent();
@@ -31,6 +32,7 @@ pub fn record_frame(
         voxel,
         render_mode,
         light_dir,
+        always_instant,
     });
 
     let mut builder = AutoCommandBufferBuilder::primary(

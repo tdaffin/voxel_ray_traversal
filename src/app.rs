@@ -40,6 +40,7 @@ pub struct App {
     pub(crate) render_mode: RenderMode,
     pub(crate) render_scale: f32,
     pub(crate) light_dir: [f32; 3],
+    pub(crate) always_instant: bool,
 
     input: InputController,
     frame_timer: FrameTimer,
@@ -62,6 +63,7 @@ impl App {
             render_mode,
             render_scale,
             light_dir: [0.5, 0.8, 0.3],
+            always_instant: false,
             input,
             frame_timer,
             rcx: None,
@@ -135,6 +137,7 @@ impl App {
                 &self.camera,
                 &self.voxel.manager,
                 self.render_mode as u32,
+                self.always_instant,
                 &self.pipelines,
                 self.gpu.queue.clone(),
                 self.gpu.command_buffer_allocator.clone(),
@@ -154,6 +157,7 @@ impl App {
             self.render_mode as u32,
             image_index,
             self.light_dir,
+            self.always_instant,
         );
 
         let render_future =
