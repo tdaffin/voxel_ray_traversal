@@ -79,105 +79,21 @@ bool readVoxel(uvec3 coord, inout uvec4 texel, inout ivec3 texel_coord, int grid
 
 const float FLT_MAX = 3.4028235e+38;
 
-vec3 calc_color(uvec3 coord, uvec3 dims, vec3 localNormal, vec3 localHit, uint stepped_axis,
-    float tmin, float t_inside, vec3 dir, int gridIndex, vec3 sgn_dir)
-{
-    switch (pc.render_mode) {
-        case COORD:
-            return vec3(coord) / max(vec3(dims) - 1.0, vec3(1.0));
-        case NORMAL:
-            {
-                vec3 normalWorld = normalize(mat3(gridInfos[gridIndex].gridToWorld) * localNormal);
-                return normalWorld * 0.5 + vec3(0.5);
-            }
-        case UV:
-            {
-                vec3 local_hit = localHit - vec3(coord);
-                vec2 uv;
-                if (stepped_axis == 0u) {
-                    uv = local_hit.yz;
-                } else if (stepped_axis == 1u) {
-                    uv = local_hit.xz;
-                } else {
-                    uv = local_hit.xy;
-                }
-                return vec3(uv, 0);
-            }
-        case DEPTH:
-            {
-                float depth = (tmin + t_inside) * length(dir);
-                float maxDim = float(max(dims.x, max(dims.y, dims.z)));
-                return vec3(1.0 / (1.0 + depth / maxDim)) + vec3(0.3, 0.0, 0.7) / 256.0;
-            }
-        case SHADE:
-            {
-                uint local_idx = imageLoad(voxelColorIndices[gridIndex], ivec3(coord)).r;
-                uint base = gridInfos[gridIndex].paletteBase;
-                uint plen = gridInfos[gridIndex].paletteLen;
-                uint clamped = (plen == 0u) ? 0u : min(local_idx, plen - 1u);
-                uint palette_idx = base + clamped;
-                vec3 voxel_base_color = vec3(1.0);
-                if (palette_idx < palette.length()) {
-                    voxel_base_color = palette[palette_idx].rgb;
-                }
-                vec3 normalWorld = normalize(mat3(gridInfos[gridIndex].gridToWorld) * localNormal);
-                vec3 light_dir = normalize(pc.lightDir.xyz);
-                float ndotl = clamp(dot(normalWorld, light_dir), -1.0, 1.0);
-                float diff = (ndotl + 1.0) * 0.5;
-
-                uvec3 base_coord = coord;
-                uvec3 nbr = coord;
-                if (stepped_axis == 0u) nbr.x = min(nbr.x + (uint(sgn_dir.x > 0.0)), dims.x - 1u);
-                if (stepped_axis == 1u) nbr.y = min(nbr.y + (uint(sgn_dir.y > 0.0)), dims.y - 1u);
-                if (stepped_axis == 2u) nbr.z = min(nbr.z + (uint(sgn_dir.z > 0.0)), dims.z - 1u);
-
-                ivec3 idir = ivec3(nbr) - ivec3(base_coord);
-                int dAxis = 0;
-                if (abs(idir.y) > 0) dAxis = 1; else if (abs(idir.z) > 0) dAxis = 2;
-
-                int OFFS[2] = int[2](-1, 1);
-                int occ = 0;
-                int probes = 0;
-                for (int ax = 0; ax < 3; ++ax) {
-                    if (ax == dAxis) continue;
-                    for (int oi = 0; oi < 2; ++oi) {
-                        ivec3 p = ivec3(nbr);
-                        if (ax == 0) p.x += OFFS[oi];
-                        if (ax == 1) p.y += OFFS[oi];
-                        if (ax == 2) p.z += OFFS[oi];
-                        if (p.x < 0 || p.y < 0 || p.z < 0 || p.x >= int(dims.x) || p.y >= int(dims.y) || p.z >= int(dims.z))
-                            continue;
-                        uvec3 q = uvec3(p);
-                        uvec4 texAO;
-                        ivec3 texAOcoord = ivec3(-1);
-                        if (readVoxel(q, texAO, texAOcoord, gridIndex)) {
-                            occ++;
-                        }
-                        probes++;
-                    }
-                }
-                float ao = 1.0 - float(occ) * 0.2;
-                ao = clamp(ao, 0.0, 1.0);
-                float c = diff * ao;
-
-                // Depth weighting: reuse same depth notion as DEPTH (approx distance from entry point)
-                /*float depth = (tmin + t_inside) * length(dir);
-                float maxDim = float(max(dims.x, max(dims.y, dims.z)));
-                float depth_term = (1.0 / (1.0 + depth / maxDim));
-                // Combine similar to rust: c = c*0.6 + spos[2]*0.4, approximate spos.z with normalized depth term.
-                c = c * 0.6 + depth_term * 0.4;*/
-                return voxel_base_color * c;
-            }
-    }
-    return vec3(0.0);
-}
-
 bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, vec3 rdNormWorld,
-    out vec3 color, out float hitDistance, out uint stepsTaken)
+    out float hitDistance, out uint stepsTaken, out uvec3 outCoord, out vec3 outLocalNormal,
+    out vec3 outLocalHit, out uint outSteppedAxis, out float outTmin, out float outTInside,
+    out vec3 outSgnDir)
 {
     uint stepsLocal = 0u;
     hitDistance = FLT_MAX;
     stepsTaken = 0u;
+    outCoord = uvec3(0);
+    outLocalNormal = vec3(0);
+    outLocalHit = vec3(0);
+    outSteppedAxis = 0u;
+    outTmin = 0.0;
+    outTInside = 0.0;
+    outSgnDir = vec3(0);
     vec3 inv_dir = 1. / dir;
     vec3 sgn_dir = sign(inv_dir);
     inv_dir = clamp(inv_dir, vec3(-FLT_MAX), vec3(FLT_MAX));
@@ -275,8 +191,107 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     vec3 hitWorld = (gridInfos[gridIndex].gridToWorld * vec4(localHit, 1.0)).xyz;
     hitDistance = length(hitWorld - roWorld);
     stepsTaken = stepsLocal;
-    color = calc_color(coord, dims, localNormal, localHit, stepped_axis, tmin, t_inside, dir, gridIndex, sgn_dir);
+    outCoord = coord;
+    outLocalNormal = localNormal;
+    outLocalHit = localHit;
+    outSteppedAxis = stepped_axis;
+    outTmin = tmin;
+    outTInside = t_inside;
+    outSgnDir = sgn_dir;
     return true;
+}
+
+vec3 calc_color(uvec3 coord, uvec3 dims, vec3 localNormal, vec3 localHit, uint stepped_axis,
+    float tmin, float t_inside, vec3 dir, int gridIndex, vec3 sgn_dir)
+{
+    switch (pc.render_mode) {
+        case COORD:
+            return vec3(coord) / max(vec3(dims) - 1.0, vec3(1.0));
+        case NORMAL:
+            {
+                vec3 normalWorld = normalize(mat3(gridInfos[gridIndex].gridToWorld) * localNormal);
+                return normalWorld * 0.5 + vec3(0.5);
+            }
+        case UV:
+            {
+                vec3 local_hit = localHit - vec3(coord);
+                vec2 uv;
+                if (stepped_axis == 0u) {
+                    uv = local_hit.yz;
+                } else if (stepped_axis == 1u) {
+                    uv = local_hit.xz;
+                } else {
+                    uv = local_hit.xy;
+                }
+                return vec3(uv, 0);
+            }
+        case DEPTH:
+            {
+                float depth = (tmin + t_inside) * length(dir);
+                float maxDim = float(max(dims.x, max(dims.y, dims.z)));
+                return vec3(1.0 / (1.0 + depth / maxDim)) + vec3(0.3, 0.0, 0.7) / 256.0;
+            }
+        case SHADE:
+            {
+                uint local_idx = imageLoad(voxelColorIndices[gridIndex], ivec3(coord)).r;
+                uint base = gridInfos[gridIndex].paletteBase;
+                uint plen = gridInfos[gridIndex].paletteLen;
+                uint clamped = (plen == 0u) ? 0u : min(local_idx, plen - 1u);
+                uint palette_idx = base + clamped;
+                vec3 voxel_base_color = vec3(1.0);
+                if (palette_idx < palette.length()) {
+                    voxel_base_color = palette[palette_idx].rgb;
+                }
+                vec3 normalWorld = normalize(mat3(gridInfos[gridIndex].gridToWorld) * localNormal);
+                vec3 light_dir = normalize(pc.lightDir.xyz);
+                float ndotl = clamp(dot(normalWorld, light_dir), -1.0, 1.0);
+                float diff = (ndotl + 1.0) * 0.5;
+
+                uvec3 base_coord = coord;
+                uvec3 nbr = coord;
+                if (stepped_axis == 0u) nbr.x = min(nbr.x + (uint(sgn_dir.x > 0.0)), dims.x - 1u);
+                if (stepped_axis == 1u) nbr.y = min(nbr.y + (uint(sgn_dir.y > 0.0)), dims.y - 1u);
+                if (stepped_axis == 2u) nbr.z = min(nbr.z + (uint(sgn_dir.z > 0.0)), dims.z - 1u);
+
+                ivec3 idir = ivec3(nbr) - ivec3(base_coord);
+                int dAxis = 0;
+                if (abs(idir.y) > 0) dAxis = 1; else if (abs(idir.z) > 0) dAxis = 2;
+
+                int OFFS[2] = int[2](-1, 1);
+                int occ = 0;
+                int probes = 0;
+                for (int ax = 0; ax < 3; ++ax) {
+                    if (ax == dAxis) continue;
+                    for (int oi = 0; oi < 2; ++oi) {
+                        ivec3 p = ivec3(nbr);
+                        if (ax == 0) p.x += OFFS[oi];
+                        if (ax == 1) p.y += OFFS[oi];
+                        if (ax == 2) p.z += OFFS[oi];
+                        if (p.x < 0 || p.y < 0 || p.z < 0 || p.x >= int(dims.x) || p.y >= int(dims.y) || p.z >= int(dims.z))
+                            continue;
+                        uvec3 q = uvec3(p);
+                        uvec4 texAO;
+                        ivec3 texAOcoord = ivec3(-1);
+                        if (readVoxel(q, texAO, texAOcoord, gridIndex)) {
+                            occ++;
+                        }
+                        probes++;
+                    }
+                }
+                float ao = 1.0 - float(occ) * 0.2;
+                ao = clamp(ao, 0.0, 1.0);
+                float c = diff * ao;
+
+                // Depth weighting: reuse same depth notion as DEPTH (approx distance from entry point)
+                /*float depth = (tmin + t_inside) * length(dir);
+                float maxDim = float(max(dims.x, max(dims.y, dims.z)));
+                float depth_term = (1.0 / (1.0 + depth / maxDim));
+                // Combine similar to rust: c = c*0.6 + spos[2]*0.4, approximate spos.z with normalized depth term.
+                c = c * 0.6 + depth_term * 0.4;*/
+                return voxel_base_color * c;
+            }
+    }
+    return vec3(0.0);
 }
 
 void renderSteps(ivec2 pixelCoord, uint steps, uint maxDim) {
@@ -351,7 +366,6 @@ void main() {
             }
         }
     }
-    vec3 bestColor = vec3(0);
     float bestDistance = FLT_MAX;
     uint totalSteps = 0u;
     uint stepsToBest = 0u;
@@ -359,6 +373,16 @@ void main() {
     uint last_size = 0u;
     int grid_found = int(gridCount);
     bool hitFound = false;
+    uvec3 bestCoord = uvec3(0);
+    vec3 bestLocalNormal = vec3(0.0);
+    vec3 bestLocalHit = vec3(0.0);
+    uint bestSteppedAxis = 0u;
+    float bestTmin = 0.0;
+    float bestTInside = 0.0;
+    vec3 bestSgnDir = vec3(0.0);
+    vec3 bestLocalDir = vec3(0.0);
+    uvec3 bestDims = uvec3(0);
+    int bestGridIdx = -1;
     for (int order = 0; order < int(gridCount); ++order) {
         int gridIdx = gridOrder[order];
         if (gridIdx < 0)
@@ -370,18 +394,34 @@ void main() {
         last_size = size;
         vec3 localOrigin = localOrigins[gridIdx];
         vec3 localDir = localDirections[gridIdx];
-        vec3 candidateColor;
         float candidateDistance;
         uint stepsTaken;
+        uvec3 hitCoord;
+        vec3 hitLocalNormal;
+        vec3 hitLocalHit;
+        uint hitSteppedAxis;
+        float hitTmin;
+        float hitTInside;
+        vec3 hitSgnDir;
         bool hitThisGrid = traversal(gridIdx, localOrigin, localDir, dims, ro, rdNorm,
-            candidateColor, candidateDistance, stepsTaken);
+            candidateDistance, stepsTaken, hitCoord, hitLocalNormal, hitLocalHit,
+            hitSteppedAxis, hitTmin, hitTInside, hitSgnDir);
         if (hitThisGrid && candidateDistance < bestDistance) {
             bestDistance = candidateDistance;
-            bestColor = candidateColor;
             bestSize = size;
             stepsToBest = totalSteps + stepsTaken;
             grid_found = gridIdx;
             hitFound = true;
+            bestCoord = hitCoord;
+            bestLocalNormal = hitLocalNormal;
+            bestLocalHit = hitLocalHit;
+            bestSteppedAxis = hitSteppedAxis;
+            bestTmin = hitTmin;
+            bestTInside = hitTInside;
+            bestSgnDir = hitSgnDir;
+            bestLocalDir = localDir;
+            bestDims = dims;
+            bestGridIdx = gridIdx;
         }
         totalSteps += stepsTaken;
     }
@@ -392,8 +432,11 @@ void main() {
             // If no hit, visualize steps vs last grid size
             renderSteps(pixelCoord, totalSteps, last_size);
         }
-    } else if (hitFound)
-        imageStore(targetImage, pixelCoord, vec4(bestColor, 1));
+    } else if (hitFound) {
+        vec3 color = calc_color(bestCoord, bestDims, bestLocalNormal, bestLocalHit, bestSteppedAxis,
+            bestTmin, bestTInside, bestLocalDir, bestGridIdx, bestSgnDir);
+        imageStore(targetImage, pixelCoord, vec4(color, 1));
+    }
     //if (pixelCoord == debugCoord) { 
     if (pc.render_mode == DEBUG) {
         //vec4 color = vec4(1, 0, 1, 1)
