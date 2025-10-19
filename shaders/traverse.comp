@@ -95,16 +95,16 @@ struct HitAttributes {
     vec3 localDir;    // Ray direction expressed in grid-local space.
     vec3 entryPoint;  // Grid-local position where the ray first entered the grid's bounds.
     int gridIndex;    // Index into `gridInfos` and associated buffers identifying the grid that was hit.
+    float hitDistance; // World-space distance from ray origin to the hit point for this grid.
+    uint stepsTaken;   // Number of voxel steps taken within this grid traversal.
 };
 
 // Performs voxel traversal for a single grid, recording the first hit and gathering hit attributes.
 // Returns true when a solid voxel is encountered, writing the distance traveled, steps taken, and `HitAttributes`.
 bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, vec3 rdNormWorld,
-    out float hitDistance, out uint stepsTaken, out HitAttributes outHit)
+    out HitAttributes outHit)
 {
     uint stepsLocal = 0u;
-    hitDistance = FLT_MAX;
-    stepsTaken = 0u;
     outHit.coord = uvec3(0);
     outHit.localNormal = vec3(0);
     outHit.localHit = vec3(0);
@@ -116,6 +116,8 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     outHit.localDir = dir;
     outHit.entryPoint = vec3(0);
     outHit.gridIndex = gridIndex;
+    outHit.hitDistance = FLT_MAX;
+    outHit.stepsTaken = 0u;
     vec3 inv_dir = 1. / dir;
     vec3 sgn_dir = sign(inv_dir);
     inv_dir = clamp(inv_dir, vec3(-FLT_MAX), vec3(FLT_MAX));
@@ -134,7 +136,8 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     }
 
     if (tmin > tmax) {
-        stepsTaken = stepsLocal;
+        outHit.stepsTaken = stepsLocal;
+        outHit.hitDistance = FLT_MAX;
         return false;
     }
 
@@ -199,7 +202,8 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
 #endif
 
             if (any(greaterThanEqual(coord, dims))) {
-                stepsTaken = stepsLocal;
+                outHit.stepsTaken = stepsLocal;
+                outHit.hitDistance = FLT_MAX;
                 return false;
             }
             if (readVoxel(coord, texel, texel_coord, gridIndex))
@@ -213,8 +217,8 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     vec3 localNormal = -mask * sgn_dir;
     vec3 localHit = origin + dir * t_inside;
     vec3 hitWorld = (gridInfos[gridIndex].gridToWorld * vec4(localHit, 1.0)).xyz;
-    hitDistance = length(hitWorld - roWorld);
-    stepsTaken = stepsLocal;
+    outHit.hitDistance = length(hitWorld - roWorld);
+    outHit.stepsTaken = stepsLocal;
     outHit.coord = coord;
     outHit.localNormal = localNormal;
     outHit.localHit = localHit;
@@ -409,7 +413,7 @@ void main() {
     uint totalSteps = 0u;
     uint stepsToBest = 0u;
     uint bestSize = 0u;
-    uint last_size = 0u;
+    uint largest_size = 0u;
     int grid_found = int(gridCount);
     bool hitFound = false;
     HitAttributes bestHit;
@@ -432,30 +436,27 @@ void main() {
             continue; // no intersection
         uvec3 dims = uvec3(gridInfos[gridIdx].dimX, gridInfos[gridIdx].dimY, gridInfos[gridIdx].dimZ);
         uint size = max(dims.x, max(dims.y, dims.z));
-        last_size = size;
+        largest_size = max(largest_size, size);
         vec3 localOrigin = localOrigins[gridIdx];
         vec3 localDir = localDirections[gridIdx];
-        float candidateDistance;
-        uint stepsTaken;
         HitAttributes hitAttr;
-        bool hitThisGrid = traversal(gridIdx, localOrigin, localDir, dims, ro, rdNorm,
-            candidateDistance, stepsTaken, hitAttr);
-        if (hitThisGrid && candidateDistance < bestDistance) {
-            bestDistance = candidateDistance;
+        bool hitThisGrid = traversal(gridIdx, localOrigin, localDir, dims, ro, rdNorm, hitAttr);
+        if (hitThisGrid && hitAttr.hitDistance < bestDistance) {
+            bestDistance = hitAttr.hitDistance;
             bestSize = size;
-            stepsToBest = totalSteps + stepsTaken;
+            stepsToBest = totalSteps + hitAttr.stepsTaken;
             grid_found = gridIdx;
             hitFound = true;
             bestHit = hitAttr;
         }
-        totalSteps += stepsTaken;
+        totalSteps += hitAttr.stepsTaken;
     }
     if (pc.render_mode == STEPS) {
         if (hitFound) {
             renderSteps(pixelCoord, stepsToBest, bestSize);
         } else if (totalSteps > 0u && gridCount > 0u) {
             // If no hit, visualize steps vs last grid size
-            renderSteps(pixelCoord, totalSteps, last_size);
+            renderSteps(pixelCoord, totalSteps, largest_size);
         }
     } else if (hitFound) {
         vec3 color = calc_color(bestHit);
