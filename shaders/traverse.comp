@@ -277,11 +277,11 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
                 float c = diff * ao;
 
                 // Depth weighting: reuse same depth notion as DEPTH (approx distance from entry point)
-                float depth = (tmin + t_inside) * length(dir);
+                /*float depth = (tmin + t_inside) * length(dir);
                 float maxDim = float(max(dims.x, max(dims.y, dims.z)));
                 float depth_term = (1.0 / (1.0 + depth / maxDim));
                 // Combine similar to rust: c = c*0.6 + spos[2]*0.4, approximate spos.z with normalized depth term.
-                c = c * 0.6 + depth_term * 0.4;
+                c = c * 0.6 + depth_term * 0.4;*/
                 color = voxel_base_color * c;
             }
             break;
