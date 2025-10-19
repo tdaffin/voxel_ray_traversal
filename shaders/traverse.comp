@@ -178,6 +178,10 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     mask[stepped_axis] = 1;
     float t_inside = dot(t, mask) - dot(delta, mask);
     vec3 localNormal = -mask * sgn_dir;
+    vec3 localHit = origin + dir * t_inside;
+    vec3 hitWorld = (gridInfos[gridIndex].gridToWorld * vec4(localHit, 1.0)).xyz;
+    hitDistance = length(hitWorld - roWorld);
+    stepsTaken = stepsLocal;
 
     switch (pc.render_mode) {
         case COORD:
@@ -190,8 +194,7 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
             }
             break;
         case UV:
-            vec3 hit = origin + dir * t_inside;
-            vec3 local_hit = hit - coord;
+            vec3 local_hit = localHit - coord;
             vec2 uv;
             if (stepped_axis == 0) {
                 uv = local_hit.yz;
@@ -283,10 +286,6 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
             }
             break;
     }
-    vec3 localHit = origin + dir * t_inside;
-    vec3 hitWorld = (gridInfos[gridIndex].gridToWorld * vec4(localHit, 1.0)).xyz;
-    hitDistance = length(hitWorld - roWorld);
-    stepsTaken = stepsLocal;
     return true;
 }
 
