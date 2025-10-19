@@ -389,14 +389,15 @@ void main() {
         }
         totalSteps += stepsTaken;
     }
-    // If no hit, optionally visualize steps vs last grid size
-    if (hitFound) {
-        if (pc.render_mode != STEPS) {
-            imageStore(targetImage, pixelCoord, vec4(bestColor, 1));
-        } else {
+    if (pc.render_mode == STEPS) {
+        if (hitFound) {
             renderSteps(pixelCoord, stepsToBest, bestSize);
+        } else if (totalSteps > 0u && gridCount > 0u) {
+            // If no hit, visualize steps vs last grid size
+            renderSteps(pixelCoord, totalSteps, last_size);
         }
-    } else if (totalSteps > 0u && pc.render_mode == STEPS && gridCount > 0u) {
-        renderSteps(pixelCoord, totalSteps, last_size);
+        return;
     }
+    if (hitFound)
+        imageStore(targetImage, pixelCoord, vec4(bestColor, 1));
 }
