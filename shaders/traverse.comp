@@ -97,6 +97,7 @@ struct HitAttributes {
     int gridIndex;    // Index into `gridInfos` and associated buffers identifying the grid that was hit.
     float hitDistance; // World-space distance from ray origin to the hit point for this grid.
     uint stepsTaken;   // Number of voxel steps taken within this grid traversal.
+    bool outOfBounds; // True if the traversal exited the grid bounds without hitting a voxel.
 };
 
 // Performs voxel traversal for a single grid, recording the first hit and gathering hit attributes.
@@ -118,6 +119,7 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     outHit.gridIndex = gridIndex;
     outHit.hitDistance = FLT_MAX;
     outHit.stepsTaken = 0u;
+    outHit.outOfBounds = false;
     vec3 inv_dir = 1. / dir;
     vec3 sgn_dir = sign(inv_dir);
     inv_dir = clamp(inv_dir, vec3(-FLT_MAX), vec3(FLT_MAX));
@@ -163,52 +165,50 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     ivec3 texel_coord = ivec3(coord.x / 4, coord.y / 4, coord.z / 8);
     uvec4 texel = imageLoad(voxelImages[gridIndex], texel_coord);
     bool initialOccupied = bool(texel[coord.x % 4] >> ((coord.y % 4) + (coord.z % 8) * 4) & 1u);
-    bool instantHit = (pc.always_instant != 0u) || initialOccupied;
-    if (!instantHit) {
-        while (true) {
-            stepsLocal++;
+    bool hit = (pc.always_instant != 0u) || initialOccupied;
+    while (!hit) {
+        stepsLocal++;
 #ifndef BRANCHLESS_TRAVERSAL
-            if (t.x < t.y) {
-                if (t.x < t.z) {
-                    coord.x += ustep.x;
-                    t.x += delta.x;
-                    stepped_axis = 0;
-                } else {
-                    coord.z += ustep.z;
-                    t.z += delta.z;
-                    stepped_axis = 2;
-                }
+        if (t.x < t.y) {
+            if (t.x < t.z) {
+                coord.x += ustep.x;
+                t.x += delta.x;
+                stepped_axis = 0;
             } else {
-                if (t.y < t.z) {
-                    coord.y += ustep.y;
-                    t.y += delta.y;
-                    stepped_axis = 1;
-                } else {
-                    coord.z += ustep.z;
-                    t.z += delta.z;
-                    stepped_axis = 2;
-                }
+                coord.z += ustep.z;
+                t.z += delta.z;
+                stepped_axis = 2;
             }
+        } else {
+            if (t.y < t.z) {
+                coord.y += ustep.y;
+                t.y += delta.y;
+                stepped_axis = 1;
+            } else {
+                coord.z += ustep.z;
+                t.z += delta.z;
+                stepped_axis = 2;
+            }
+        }
 #else
-            // Branchless variant: compute mask selecting axis to advance.
-            uvec3 mask = uvec3(
-                (t.x < t.y && t.x < t.z) ? 1u : 0u,
-                (t.x >= t.y && t.y < t.z) ? 1u : 0u,
-                (t.x >= t.z && t.y >= t.z) ? 1u : 0u
-            );
-            coord += ustep * mask;
-            t += delta * mask;
-            stepped_axis = (mask.x != 0u) ? 0u : ((mask.y != 0u) ? 1u : 2u);
+        // Branchless variant: compute mask selecting axis to advance.
+        uvec3 mask = uvec3(
+            (t.x < t.y && t.x < t.z) ? 1u : 0u,
+            (t.x >= t.y && t.y < t.z) ? 1u : 0u,
+            (t.x >= t.z && t.y >= t.z) ? 1u : 0u
+        );
+        coord += ustep * mask;
+        t += delta * mask;
+        stepped_axis = (mask.x != 0u) ? 0u : ((mask.y != 0u) ? 1u : 2u);
 #endif
 
-            if (any(greaterThanEqual(coord, dims))) {
-                outHit.stepsTaken = stepsLocal;
-                outHit.hitDistance = FLT_MAX;
-                return false;
-            }
-            if (readVoxel(coord, texel, texel_coord, gridIndex))
-                break;
+        if (any(greaterThanEqual(coord, dims))) {
+            outHit.outOfBounds = true;
+            hit = true;
+            break;
         }
+        if (readVoxel(coord, texel, texel_coord, gridIndex))
+            hit = true;
     }
 
     vec3 mask = vec3(0);
@@ -226,11 +226,7 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     outHit.tmin = tmin;
     outHit.tInside = t_inside;
     outHit.sgnDir = sgn_dir;
-    outHit.dims = dims;
-    outHit.localDir = dir;
-    outHit.entryPoint = origin;
-    outHit.gridIndex = gridIndex;
-    return true;
+    return hit;
 }
 
 // Converts the gathered hit attributes into an RGB color according to the current render mode.
@@ -322,6 +318,7 @@ vec3 calc_color(HitAttributes hit)
                 float ao = 1.0 - float(occ) * 0.2;
                 ao = clamp(ao, 0.0, 1.0);
                 float c = diff * ao;
+                c = diff;
 
                 // Depth weighting: reuse same depth notion as DEPTH (approx distance from entry point)
                 /*float depth = (hit.tmin + hit.tInside) * length(hit.localDir);
@@ -414,7 +411,6 @@ void main() {
     uint stepsToBest = 0u;
     uint bestSize = 0u;
     uint largest_size = 0u;
-    int grid_found = int(gridCount);
     bool hitFound = false;
     HitAttributes bestHit;
     bestHit.coord = uvec3(0);
@@ -445,17 +441,20 @@ void main() {
             bestDistance = hitAttr.hitDistance;
             bestSize = size;
             stepsToBest = totalSteps + hitAttr.stepsTaken;
-            grid_found = gridIdx;
             hitFound = true;
             bestHit = hitAttr;
         }
+        /*if (hitAttr.outOfBounds) {
+            // Stop checking further grids if the ray has exited the current grid without a hit.
+            break;
+        }*/
         totalSteps += hitAttr.stepsTaken;
     }
     if (pc.render_mode == STEPS) {
         if (hitFound) {
             renderSteps(pixelCoord, stepsToBest, bestSize);
         } else if (totalSteps > 0u && gridCount > 0u) {
-            // If no hit, visualize steps vs last grid size
+            // If no hit, visualize steps vs largest grid size
             renderSteps(pixelCoord, totalSteps, largest_size);
         }
     } else if (hitFound) {
@@ -464,8 +463,10 @@ void main() {
     }
     //if (pixelCoord == debugCoord) { 
     if (pc.render_mode == DEBUG) {
+        if (hitFound){
+            vec4 color = vec4(1, bestHit.gridIndex / float(gridCount), 1, 1);
+            imageStore(targetImage, pixelCoord, color);
+        }
         //vec4 color = vec4(1, 0, 1, 1)
-        vec4 color = vec4(1, grid_found / float(gridCount), 1, 1);
-        imageStore(targetImage, pixelCoord, color);
     }
 }
