@@ -30,7 +30,7 @@ impl Default for AppBuilder {
             initial_voxel_resolution: DEFAULT_INITIAL_VOXEL_RESOLUTION,
             // no single selected model now (dynamic discovery)
             render_mode: RenderMode::Shade,
-            render_scale: 1.0,
+            render_scale: 0.25,
             window_resolution: DEFAULT_WINDOW_RESOLUTION,
             camera_fov: 35.0,
         }
@@ -81,8 +81,9 @@ impl AppBuilder {
         let future_grid_resolutions = voxel.manager.grid_resolutions.clone();
 
         // Camera setup
-        let target = Vector3::new(-0.5, 0.0, 0.0);
-        let cam_pos = target + Vector3::new(-1.0, 1.0, 1.0);
+        let target = Vector3::new(-0.5, 0.0, -0.5);
+        let cam_pos = target + Vector3::new(-0.5, 0.5, 0.5);
+
         let mut camera =
             Camera::new(cam_pos, Vector3::zeros(), self.window_resolution.into(), self.camera_fov);
         camera.look_at(target);
