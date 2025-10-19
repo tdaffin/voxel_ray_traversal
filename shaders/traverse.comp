@@ -8,6 +8,7 @@ const uint NORMAL = 2;
 const uint UV = 3;
 const uint DEPTH = 4;
 const uint SHADE = 5; // New: shaded lighting + simple AO (update host RenderMode enum accordingly)
+const uint DEBUG = 6;
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -294,6 +295,10 @@ void renderSteps(ivec2 pixelCoord, uint steps, uint maxDim) {
     imageStore(targetImage, pixelCoord, vec4(color, 1));
 }
 
+const uint debugX = 180;
+const uint debugY = 86;
+const ivec2 debugCoord = ivec2(debugX, debugY);
+
 void main() {
     ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
     ivec2 imageSize = imageSize(targetImage);
@@ -363,6 +368,7 @@ void main() {
     uint stepsToBest = 0u;
     uint bestSize = 0u;
     uint last_size = 0u;
+    int grid_found = int(gridCount);
     bool hitFound = false;
     for (int order = 0; order < int(gridCount); ++order) {
         int gridIdx = gridOrder[order];
@@ -385,6 +391,7 @@ void main() {
             bestColor = candidateColor;
             bestSize = size;
             stepsToBest = totalSteps + stepsTaken;
+            grid_found = gridIdx;
             hitFound = true;
         }
         totalSteps += stepsTaken;
@@ -396,8 +403,12 @@ void main() {
             // If no hit, visualize steps vs last grid size
             renderSteps(pixelCoord, totalSteps, last_size);
         }
-        return;
-    }
-    if (hitFound)
+    } else if (hitFound)
         imageStore(targetImage, pixelCoord, vec4(bestColor, 1));
+    //if (pixelCoord == debugCoord) { 
+    if (pc.render_mode == DEBUG) {
+        //vec4 color = vec4(1, 0, 1, 1)
+        vec4 color = vec4(1, grid_found / float(gridCount), 1, 1);
+        imageStore(targetImage, pixelCoord, color);
+    }
 }

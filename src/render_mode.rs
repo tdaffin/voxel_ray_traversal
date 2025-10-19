@@ -7,6 +7,7 @@ pub enum RenderMode {
     UV = 3,
     Depth = 4,
     Shade = 5, // New shaded lighting + AO mode (matches SHADE in traverse.comp)
+    Debug = 6,
 }
 
 impl RenderMode {
@@ -17,5 +18,6 @@ impl RenderMode {
         RenderMode::UV,
         RenderMode::Depth,
         RenderMode::Shade,
+        RenderMode::Debug,
     ];
 }
