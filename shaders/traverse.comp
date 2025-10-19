@@ -284,15 +284,30 @@ vec3 calc_color(HitAttributes hit)
                 float ndotl = clamp(dot(normalWorld, light_dir), -1.0, 1.0);
                 float diff = (ndotl + 1.0) * 0.5;
 
-                uvec3 base_coord = hit.coord;
-                uvec3 nbr = hit.coord;
-                if (hit.steppedAxis == 0u) nbr.x = min(nbr.x + (uint(hit.sgnDir.x > 0.0)), hit.dims.x - 1u);
-                if (hit.steppedAxis == 1u) nbr.y = min(nbr.y + (uint(hit.sgnDir.y > 0.0)), hit.dims.y - 1u);
-                if (hit.steppedAxis == 2u) nbr.z = min(nbr.z + (uint(hit.sgnDir.z > 0.0)), hit.dims.z - 1u);
-
-                ivec3 idir = ivec3(nbr) - ivec3(base_coord);
+                ivec3 base_coord = ivec3(hit.coord);
+                ivec3 nbr = ivec3(hit.coord);
+                if (hit.steppedAxis == 0u) {
+                    if (hit.sgnDir.x > 0.0)
+                        nbr.x = nbr.x - 1;
+                    else
+                        nbr.x = nbr.x + 1;
+                } else if (hit.steppedAxis == 1u) {
+                    if (hit.sgnDir.y > 0.0)
+                        nbr.y = nbr.y - 1;
+                    else
+                        nbr.y = nbr.y + 1;
+                } else {
+                    if (hit.sgnDir.z > 0.0)
+                        nbr.z = nbr.z - 1;
+                    else
+                        nbr.z = nbr.z + 1;
+                }
+                ivec3 idir = nbr - base_coord;
                 int dAxis = 0;
-                if (abs(idir.y) > 0) dAxis = 1; else if (abs(idir.z) > 0) dAxis = 2;
+                if (abs(idir.y) > 0)
+                    dAxis = 1;
+                else if (abs(idir.z) > 0)
+                    dAxis = 2;
 
                 int OFFS[2] = int[2](-1, 1);
                 int occ = 0;
@@ -315,10 +330,10 @@ vec3 calc_color(HitAttributes hit)
                         probes++;
                     }
                 }
-                float ao = 1.0 - float(occ) * 0.2;
+                if (probes == 0) probes = 1; // avoid div by zero
+                float ao = 1.0 - float(occ) / float(probes) * 0.2;
                 ao = clamp(ao, 0.0, 1.0);
                 float c = diff * ao;
-                c = diff;
 
                 // Depth weighting: reuse same depth notion as DEPTH (approx distance from entry point)
                 /*float depth = (hit.tmin + hit.tInside) * length(hit.localDir);
