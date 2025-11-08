@@ -282,6 +282,20 @@ impl App {
                         format_with_commas(render_extent[1] as u64),
                         format_with_commas((render_extent[0] * render_extent[1]) as u64)
                     ));
+                    if !self.voxel.manager.tile_stats.is_empty() {
+                        ui.separator();
+                        ui.label("Compression Stats:");
+                        for (i, stats_opt) in self.voxel.manager.tile_stats.iter().enumerate() {
+                            if let Some(stats) = stats_opt {
+                                ui.label(format!(
+                                    "Grid {i}: empty={} uniform={} dense={}",
+                                    format_with_commas(stats.empty_tiles as u64),
+                                    format_with_commas(stats.uniform_tiles as u64),
+                                    format_with_commas(stats.dense_tiles as u64)
+                                ));
+                            }
+                        }
+                    }
                     // List active grid dims summary
                     if !self.voxel.manager.grid_dims.is_empty() {
                         ui.separator();

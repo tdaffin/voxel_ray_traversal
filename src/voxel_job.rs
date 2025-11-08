@@ -500,6 +500,13 @@ impl VoxelManager {
                     tile_payloads,
                     tile_stats,
                 } => {
+                    eprintln!(
+                        "[voxel] grid {index} compression: empty={} uniform={} dense={} (payloads={})",
+                        tile_stats.empty_tiles,
+                        tile_stats.uniform_tiles,
+                        tile_stats.dense_tiles,
+                        tile_payloads.len()
+                    );
                     if generation != self.voxel_generation || self.cancel_requested {
                         continue;
                     }
