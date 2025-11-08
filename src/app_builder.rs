@@ -81,8 +81,8 @@ impl AppBuilder {
         let future_grid_resolutions = voxel.manager.grid_resolutions.clone();
 
         // Camera setup
-        let target = Vector3::new(-0.5, 0.0, -0.5);
-        let cam_pos = target + Vector3::new(-0.5, 0.5, 0.5);
+        let target = Vector3::new(-0.34, -0.28, -0.45);
+        let cam_pos = target + Vector3::new(-0.35, 0.45, 0.45);
 
         let mut camera =
             Camera::new(cam_pos, Vector3::zeros(), self.window_resolution.into(), self.camera_fov);

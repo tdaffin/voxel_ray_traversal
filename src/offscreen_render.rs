@@ -72,8 +72,8 @@ pub fn render_offscreen_snapshot(
     );
 
     let mut camera = {
-        let target = Vector3::new(-0.5, 0.0, -0.5);
-        let cam_pos = target + Vector3::new(-0.5, 0.5, 0.5);
+        let target = Vector3::new(-0.34, -0.28, -0.45);
+        let cam_pos = target + Vector3::new(-0.35, 0.45, 0.45);
         let mut camera =
             Camera::new(cam_pos, Vector3::zeros(), [width as f64, height as f64], 35.0);
         camera.look_at(target);
