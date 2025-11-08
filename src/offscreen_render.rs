@@ -226,4 +226,30 @@ mod tests {
             );
         }
     }
+    
+    #[test]
+    fn verify_no_transparent() {
+        // 220, 100, 30x30
+        let snapshot = render_offscreen_snapshot(256, 256, RenderMode::Shade);
+        let mut num_transparent = 0;
+        for y in 140..=170 {
+            for x in 220..=250 {
+                let idx = (y * snapshot.width as usize + x) * 4;
+                let px = &snapshot.pixels[idx..idx + 4];
+                let mut sum = 0u32;
+                for i in 0..4 {
+                    sum += px[i] as u32;
+                    //snapshot.pixels[idx + i] = 0;
+                }
+                if sum == 0 {
+                    num_transparent += 1;
+                    println!("Found 0 pixel at ({},{}) = {:?}", x, y, px);
+                }
+            }
+        }
+        assert_eq!(num_transparent, 0, "Found {} transparent pixels in the test area", num_transparent);
+        //let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/reference");
+        //let actual_path = out_dir.join("no_transparent.actual.png");
+        //snapshot.save_png(&actual_path).expect("failed to write actual render output");
+    }
 }
