@@ -1,6 +1,7 @@
 #version 460
 #extension GL_EXT_nonuniform_qualifier : require
 
+
 // Render modes: MUST stay in sync with the Rust RenderMode enum (search for RenderMode in main.rs or related file)
 const uint COORD = 0;
 const uint STEPS = 1;
@@ -30,6 +31,9 @@ layout(set = 0, binding = 0, rgba8) writeonly uniform image2D targetImage;
 // Runtime-sized array of voxel grids (descriptor array only)
 // Fixed-size descriptor array to simplify host binding (avoid runtime descriptor array issues)
 const int MAX_GRIDS = 32;
+const float BOUNDS_EPS = 1e-3;
+const float DISTANCE_EPS = 1e-4;
+const float PLACEHOLDER_PENALTY = 1.0;
 // Per-voxel palette index (R8_UINT) stored in R component of each texel.
 // Future enhancement: add a small palette buffer (e.g. SSBO of vec4) so index -> color lookup supports custom materials.
 layout(set = 1, binding = 1, r8ui) readonly uniform uimage3D voxelColorIndices[MAX_GRIDS];
@@ -267,6 +271,9 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     vec3 localHit = origin + dir * t_inside;
     vec3 hitWorld = (gridInfos[gridIndex].gridToWorld * vec4(localHit, 1.0)).xyz;
     outHit.hitDistance = length(hitWorld - roWorld);
+    if (dims.x == 1u && dims.y == 1u && dims.z == 1u) {
+        outHit.hitDistance = max(0.0, outHit.hitDistance - 1e-3);
+    }
     outHit.stepsTaken = stepsLocal;
     outHit.coord = coord;
     outHit.localNormal = localNormal;
@@ -448,8 +455,8 @@ void main() {
     }
     for (uint g = 0; g < gridCount; g++) {
         uvec3 dims = uvec3(gridInfos[g].dimX, gridInfos[g].dimY, gridInfos[g].dimZ);
-        vec3 boundsMin = vec3(0.0);
-        vec3 boundsMax = vec3(dims);
+        vec3 boundsMin = vec3(-BOUNDS_EPS);
+        vec3 boundsMax = vec3(dims) + BOUNDS_EPS;
         vec3 t0 = vec3(0.0);
         vec3 t1 = vec3(0.0);
         for (int axis = 0; axis < 3; ++axis) {
@@ -458,7 +465,7 @@ void main() {
             float minBound = boundsMin[axis];
             float maxBound = boundsMax[axis];
             if (abs(dirComp) < 1e-6) {
-                if (originComp < minBound || originComp > maxBound) {
+                if (originComp < minBound - BOUNDS_EPS || originComp > maxBound + BOUNDS_EPS) {
                     t0[axis] = FLT_MAX;
                     t1[axis] = -FLT_MAX;
                 } else {
@@ -475,7 +482,7 @@ void main() {
         vec3 tbg = max(t0, t1);
         float tmin = max(0.0, max(tsm.x, max(tsm.y, tsm.z)));
         float tmax = min(tbg.x, min(tbg.y, tbg.z));
-        if (tmin <= tmax) { // intersects
+        if (tmin <= tmax + BOUNDS_EPS) { // intersects with tolerance
             tEnter[g] = tmin;
             tExit[g] = tmax;
         } else {
@@ -499,6 +506,7 @@ void main() {
         }
     }
     float bestDistance = FLT_MAX;
+    float bestEvalDistance = FLT_MAX;
     uint totalSteps = 0u;
     uint stepsToBest = 0u;
     uint bestSize = 0u;
@@ -523,18 +531,43 @@ void main() {
         if (tEnter[gridIdx] == FLT_MAX)
             continue; // no intersection
         uvec3 dims = uvec3(gridInfos[gridIdx].dimX, gridInfos[gridIdx].dimY, gridInfos[gridIdx].dimZ);
+    uint paletteLenGrid = gridInfos[gridIdx].paletteLen;
+    bool isPlaceholderGrid = (paletteLenGrid <= 1u) && (dims.x > 1u || dims.y > 1u || dims.z > 1u);
         uint size = max(dims.x, max(dims.y, dims.z));
         largest_size = max(largest_size, size);
         vec3 localOrigin = localOrigins[gridIdx];
         vec3 localDir = localDirections[gridIdx];
         HitAttributes hitAttr;
         bool hitThisGrid = traversal(gridIdx, localOrigin, localDir, dims, ro, rdNorm, hitAttr);
-        if (hitThisGrid && hitAttr.hitDistance < bestDistance) {
-            bestDistance = hitAttr.hitDistance;
-            bestSize = size;
-            stepsToBest = totalSteps + hitAttr.stepsTaken;
-            hitFound = true;
-            bestHit = hitAttr;
+        if (isPlaceholderGrid && hitThisGrid) {
+            hitThisGrid = false;
+        }
+        if (hitThisGrid) {
+            bool isLargeGrid = (dims.x > 1u || dims.y > 1u || dims.z > 1u);
+            float evalDistance = hitAttr.hitDistance;
+            if (isLargeGrid && paletteLenGrid <= 1u) {
+                evalDistance += PLACEHOLDER_PENALTY;
+            }
+            bool better = false;
+            if (!hitFound) {
+                better = true;
+            } else if (evalDistance + DISTANCE_EPS < bestEvalDistance) {
+                better = true;
+            } else if (abs(evalDistance - bestEvalDistance) <= DISTANCE_EPS) {
+                uint currentVolume = hitAttr.dims.x * hitAttr.dims.y * hitAttr.dims.z;
+                uint bestVolume = bestHit.dims.x * bestHit.dims.y * bestHit.dims.z;
+                if (currentVolume < bestVolume) {
+                    better = true;
+                }
+            }
+            if (better) {
+                bestDistance = hitAttr.hitDistance;
+                bestEvalDistance = evalDistance;
+                bestSize = size;
+                stepsToBest = totalSteps + hitAttr.stepsTaken;
+                hitFound = true;
+                bestHit = hitAttr;
+            }
         }
         /*if (hitAttr.outOfBounds) {
             // Stop checking further grids if the ray has exited the current grid without a hit.

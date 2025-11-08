@@ -20,7 +20,6 @@ use vulkano::{
     pipeline::{Pipeline, PipelineBindPoint},
     sync::{self, GpuFuture},
 };
-
 use crate::{
     camera::Camera,
     gpu::GpuContext,
@@ -284,4 +283,5 @@ mod tests {
         //let actual_path = out_dir.join("all_green.actual.png");
         //snapshot.save_png(&actual_path).expect("failed to write actual render output");
     }
+
 }
