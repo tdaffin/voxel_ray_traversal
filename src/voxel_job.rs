@@ -170,6 +170,7 @@ pub struct VoxelManager {
     placeholder_view: Arc<ImageView>,
     placeholder_color_view: Arc<ImageView>,
     placeholder_tile_mask_view: Arc<ImageView>,
+    ground_tile_mask_view: Arc<ImageView>,
     palette_buffer: Subbuffer<[[f32; 4]]>,
     tile_payload_buffer: Subbuffer<[TilePayloadGpu]>,
     // Step8: collect per-grid palette slices (local indices) for compaction.
@@ -290,6 +291,19 @@ impl VoxelManager {
             storage_w_placeholder,
             storage_h_placeholder,
             storage_d_placeholder,
+        );
+        let ground_mask_entries = vec![
+            crate::tile_compression::TILE_UNIFORM_BIT
+                | crate::tile_compression::TILE_UNIFORM_VALUE_BIT,
+        ];
+        let ground_tile_mask_view = create_tile_mask_image_view(
+            memory_allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            ground_mask_entries,
+            ground_storage.0,
+            ground_storage.1,
+            ground_storage.2,
         );
         let placeholder_payload_buffer =
             create_tile_payload_buffer(memory_allocator.clone(), &[TilePayloadGpu::default()]);
@@ -447,6 +461,7 @@ impl VoxelManager {
             placeholder_view,
             placeholder_color_view,
             placeholder_tile_mask_view,
+            ground_tile_mask_view,
             palette_buffer,
             tile_payload_buffer: placeholder_payload_buffer,
             palette_slices: vec![None; model_count],
@@ -834,7 +849,7 @@ impl VoxelManager {
             ground_info.tile_payload_len = 0;
             ready.push(self.ground_voxel_view.clone());
             ready_colors.push(self.ground_color_view.clone());
-            ready_masks.push(self.placeholder_tile_mask_view.clone());
+            ready_masks.push(self.ground_tile_mask_view.clone());
             infos.push(ground_info);
         }
 
