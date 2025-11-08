@@ -105,6 +105,25 @@ bool readVoxel(uvec3 coord, inout uvec4 texel, inout ivec3 texel_coord, int grid
     return ((texel[lane] >> bit_index) & 1u) != 0u;
 }
 
+const uvec3 TILE_EXTENTS = uvec3(4u, 4u, 8u);
+const vec3 TILE_SIZE = vec3(4.0, 4.0, 8.0);
+const float TILE_EPS = 1e-4;
+
+bool tile_is_effectively_empty(uint mask_entry) {
+    bool empty = (mask_entry & TILE_EMPTY_BIT) != 0u;
+    bool uniform_zero = ((mask_entry & TILE_UNIFORM_BIT) != 0u)
+        && ((mask_entry & TILE_UNIFORM_VALUE_BIT) == 0u);
+    return empty || uniform_zero;
+}
+
+float tile_exit_distance(vec3 point, vec3 dir, vec3 inv_dir, vec3 tile_min, vec3 tile_max) {
+    vec3 t1 = (tile_min - point) * inv_dir;
+    vec3 t2 = (tile_max - point) * inv_dir;
+    vec3 t_far = max(t1, t2);
+    float exit_dist = min(t_far.x, min(t_far.y, t_far.z));
+    return max(exit_dist, 0.0);
+}
+
 const float FLT_MAX = 3.4028235e+38;
 
 // Aggregate of data describing a voxel ray hit that downstream shading needs.
@@ -145,6 +164,7 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     outHit.hitDistance = FLT_MAX;
     outHit.stepsTaken = 0u;
     outHit.outOfBounds = false;
+
     vec3 inv_dir = 1. / dir;
     vec3 sgn_dir = sign(inv_dir);
     inv_dir = clamp(inv_dir, vec3(-FLT_MAX), vec3(FLT_MAX));
@@ -155,7 +175,7 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     vec3 tmins = min(t1, t2);
     vec3 tmaxs = max(t1, t2);
 
-    float tmin = 0;
+    float tmin = 0.0;
     float tmax = FLT_MAX;
     for (int i = 0; i < 3; i++) {
         tmin = max(tmin, tmins[i]);
@@ -168,90 +188,201 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
         return false;
     }
 
-    uint stepped_axis = 0u;
-    float stepped_t = tmins.x;
-    if (tmins.y > stepped_t) {
-        stepped_axis = 1u;
-        stepped_t = tmins.y;
+    uint entry_axis = 0u;
+    float entry_t = tmins.x;
+    if (tmins.y > entry_t) {
+        entry_axis = 1u;
+        entry_t = tmins.y;
     }
-    if (tmins.z > stepped_t) {
-        stepped_axis = 2u;
-        stepped_t = tmins.z;
+    if (tmins.z > entry_t) {
+        entry_axis = 2u;
+        entry_t = tmins.z;
     }
 
     origin += dir * tmin;
     outHit.entryPoint = origin;
-    uvec3 coord = uvec3(clamp(floor(origin), vec3(0), vec3(vec3(dims) - 1.0)));
-    vec3 t = (coord + 0.5 * (1 + sgn_dir) - origin) * inv_dir;
+    outHit.tmin = tmin;
+    outHit.sgnDir = sgn_dir;
 
-    uvec3 ustep = uvec3(ivec3(sgn_dir));
-    vec3 delta = inv_dir * sgn_dir;
+    vec3 dimsVec = vec3(dims);
+    ivec3 tileDims = ivec3(
+        max(int(gridInfos[gridIndex].storageW), 1),
+        max(int(gridInfos[gridIndex].storageH), 1),
+        max(int(gridInfos[gridIndex].storageD), 1)
+    );
 
-    ivec3 texel_coord = ivec3(-1);
-    uvec4 texel = uvec4(0);
-    bool initialOccupied = readVoxel(coord, texel, texel_coord, gridIndex);
-    bool hit = (pc.always_instant != 0u) || initialOccupied;
-    while (!hit) {
-        stepsLocal++;
-#ifndef BRANCHLESS_TRAVERSAL
-        if (t.x < t.y) {
-            if (t.x < t.z) {
-                coord.x += ustep.x;
-                t.x += delta.x;
-                stepped_axis = 0;
-            } else {
-                coord.z += ustep.z;
-                t.z += delta.z;
-                stepped_axis = 2;
-            }
-        } else {
-            if (t.y < t.z) {
-                coord.y += ustep.y;
-                t.y += delta.y;
-                stepped_axis = 1;
-            } else {
-                coord.z += ustep.z;
-                t.z += delta.z;
-                stepped_axis = 2;
-            }
+    float tCursor = 0.0;
+    vec3 currentPoint = origin;
+
+    while (tCursor <= tmax + 1.0) {
+        if (any(lessThan(currentPoint, vec3(0.0))) || any(greaterThanEqual(currentPoint, dimsVec))) {
+            outHit.stepsTaken = stepsLocal;
+            outHit.hitDistance = FLT_MAX;
+            outHit.outOfBounds = true;
+            return false;
         }
+
+        vec3 tilePos = floor(currentPoint / TILE_SIZE);
+        ivec3 tileCoord = ivec3(tilePos);
+        tileCoord = clamp(tileCoord, ivec3(0), tileDims - ivec3(1));
+
+        uint mask_entry = imageLoad(tileMaskImages[gridIndex], tileCoord).r;
+        uvec3 tileMinCell = uvec3(tileCoord) * TILE_EXTENTS;
+        uvec3 tileMaxCell = min(tileMinCell + TILE_EXTENTS, dims);
+        vec3 tileMin = vec3(tileMinCell);
+        vec3 tileMax = vec3(tileMaxCell);
+
+        if (tile_is_effectively_empty(mask_entry)) {
+            float exitDist = tile_exit_distance(currentPoint, dir, inv_dir, tileMin, tileMax);
+            if (isnan(exitDist) || isinf(exitDist)) {
+                outHit.stepsTaken = stepsLocal;
+                outHit.hitDistance = FLT_MAX;
+                outHit.outOfBounds = true;
+                return false;
+            }
+            vec3 t1_local = (tileMin - currentPoint) * inv_dir;
+            vec3 t2_local = (tileMax - currentPoint) * inv_dir;
+            vec3 t_far = max(t1_local, t2_local);
+            float best_exit = t_far.x;
+            uint exit_axis = 0u;
+            if (t_far.y < best_exit) {
+                best_exit = t_far.y;
+                exit_axis = 1u;
+            }
+            if (t_far.z < best_exit) {
+                best_exit = t_far.z;
+                exit_axis = 2u;
+            }
+            entry_axis = exit_axis;
+            float advance = max(exitDist, 0.0);
+            stepsLocal++;
+            tCursor += advance + TILE_EPS;
+            if (tCursor > tmax + TILE_EPS)
+                break;
+            currentPoint = origin + dir * tCursor;
+            continue;
+        }
+
+        float tileEntryCursor = tCursor;
+        vec3 localOrigin = currentPoint;
+        vec3 clampedFloor = floor(localOrigin);
+        uvec3 coord = uvec3(clamp(clampedFloor, vec3(0.0), dimsVec - vec3(1.0)));
+        vec3 t = (vec3(coord) + 0.5 * (1 + sgn_dir) - localOrigin) * inv_dir;
+        vec3 delta = inv_dir * sgn_dir;
+        uvec3 ustep = uvec3(ivec3(sgn_dir));
+        ivec3 texel_coord = ivec3(-1);
+        uvec4 texel = uvec4(0);
+
+        bool hit = (pc.always_instant != 0u);
+        if (!hit)
+            hit = readVoxel(coord, texel, texel_coord, gridIndex);
+
+    uint stepped_axis = entry_axis;
+        bool leftTile = false;
+
+        uint stepsBeforeFine = stepsLocal;
+        while (!hit) {
+            stepsLocal++;
+#ifndef BRANCHLESS_TRAVERSAL
+            if (t.x < t.y) {
+                if (t.x < t.z) {
+                    coord.x += ustep.x;
+                    t.x += delta.x;
+                    stepped_axis = 0u;
+                } else {
+                    coord.z += ustep.z;
+                    t.z += delta.z;
+                    stepped_axis = 2u;
+                }
+            } else {
+                if (t.y < t.z) {
+                    coord.y += ustep.y;
+                    t.y += delta.y;
+                    stepped_axis = 1u;
+                } else {
+                    coord.z += ustep.z;
+                    t.z += delta.z;
+                    stepped_axis = 2u;
+                }
+            }
 #else
-        // Branchless variant: compute mask selecting axis to advance.
-        uvec3 mask = uvec3(
-            (t.x < t.y && t.x < t.z) ? 1u : 0u,
-            (t.x >= t.y && t.y < t.z) ? 1u : 0u,
-            (t.x >= t.z && t.y >= t.z) ? 1u : 0u
-        );
-        coord += ustep * mask;
-        t += delta * mask;
-        stepped_axis = (mask.x != 0u) ? 0u : ((mask.y != 0u) ? 1u : 2u);
+            uvec3 mask = uvec3(
+                (t.x < t.y && t.x < t.z) ? 1u : 0u,
+                (t.x >= t.y && t.y < t.z) ? 1u : 0u,
+                (t.x >= t.z && t.y >= t.z) ? 1u : 0u
+            );
+            coord += ustep * mask;
+            t += delta * mask;
+            stepped_axis = (mask.x != 0u) ? 0u : ((mask.y != 0u) ? 1u : 2u);
 #endif
 
-        if (any(greaterThanEqual(coord, dims))) {
-            outHit.outOfBounds = true;
-            hit = true;
-            break;
+            if (any(greaterThanEqual(coord, dims))) {
+                outHit.outOfBounds = true;
+                outHit.stepsTaken = stepsLocal;
+                outHit.hitDistance = FLT_MAX;
+                return false;
+            }
+
+            if (coord.x < tileMinCell.x || coord.y < tileMinCell.y || coord.z < tileMinCell.z ||
+                coord.x >= tileMaxCell.x || coord.y >= tileMaxCell.y || coord.z >= tileMaxCell.z) {
+                leftTile = true;
+                break;
+            }
+
+            if (readVoxel(coord, texel, texel_coord, gridIndex))
+                hit = true;
         }
-        if (readVoxel(coord, texel, texel_coord, gridIndex))
-            hit = true;
+
+    if (pc.always_instant != 0u && stepsLocal == stepsBeforeFine) {
+            float ax = abs(dir.x);
+            float ay = abs(dir.y);
+            float az = abs(dir.z);
+            if (ax >= ay && ax >= az) {
+                stepped_axis = 0u;
+            } else if (ay >= az) {
+                stepped_axis = 1u;
+            } else {
+                stepped_axis = 2u;
+            }
+        }
+
+        vec3 maskVec = vec3(0.0);
+        maskVec[stepped_axis] = 1.0;
+        float localAdvance = dot(t, maskVec) - dot(delta, maskVec);
+        float paramAtCross = max(localAdvance, tileEntryCursor);
+
+        if (hit) {
+            float tHit = paramAtCross;
+            vec3 localHit = origin + dir * tHit;
+            vec3 localNormal = -maskVec * sgn_dir;
+            vec3 hitWorld = (gridInfos[gridIndex].gridToWorld * vec4(localHit, 1.0)).xyz;
+
+            outHit.hitDistance = length(hitWorld - roWorld);
+            outHit.stepsTaken = stepsLocal;
+            outHit.coord = coord;
+            outHit.localNormal = localNormal;
+            outHit.localHit = localHit;
+            outHit.steppedAxis = stepped_axis;
+            outHit.tInside = tHit;
+            outHit.sgnDir = sgn_dir;
+            return true;
+        }
+
+        if (leftTile) {
+            float advanceLocal = paramAtCross;
+            entry_axis = stepped_axis;
+            tCursor = advanceLocal + TILE_EPS;
+            if (tCursor > tmax + TILE_EPS)
+                break;
+            currentPoint = origin + dir * tCursor;
+            continue;
+        }
     }
 
-    vec3 mask = vec3(0);
-    mask[stepped_axis] = 1;
-    float t_inside = dot(t, mask) - dot(delta, mask);
-    vec3 localNormal = -mask * sgn_dir;
-    vec3 localHit = origin + dir * t_inside;
-    vec3 hitWorld = (gridInfos[gridIndex].gridToWorld * vec4(localHit, 1.0)).xyz;
-    outHit.hitDistance = length(hitWorld - roWorld);
     outHit.stepsTaken = stepsLocal;
-    outHit.coord = coord;
-    outHit.localNormal = localNormal;
-    outHit.localHit = localHit;
-    outHit.steppedAxis = stepped_axis;
-    outHit.tmin = tmin;
-    outHit.tInside = t_inside;
-    outHit.sgnDir = sgn_dir;
-    return hit;
+    outHit.hitDistance = FLT_MAX;
+    outHit.outOfBounds = true;
+    return false;
 }
 
 // Converts the gathered hit attributes into an RGB color according to the current render mode.
