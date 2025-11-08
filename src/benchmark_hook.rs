@@ -13,8 +13,7 @@ use crate::{
 
 pub fn run_bench_if_requested(
     trigger: bool, frames: u32, camera: &Camera, voxel: &VoxelManager, render_mode: u32,
-    always_instant: bool,
-    pipelines: &PipelineManager, queue: Arc<Queue>,
+    always_instant: bool, pipelines: &PipelineManager, queue: Arc<Queue>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>, rcx: &mut RenderContext,
     device: Arc<Device>,
 ) {

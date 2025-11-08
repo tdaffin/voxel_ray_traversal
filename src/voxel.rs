@@ -104,32 +104,60 @@ pub fn build_voxel_descriptor_set(
     assert!(!image_views.is_empty(), "Need at least one voxel image view");
     const MAX_GRIDS: usize = 32; // keep in sync with shader
     let layout = render_pipeline.layout().set_layouts()[1].clone();
-    // Pad to MAX_GRIDS by repeating the first view. Shader only indexes [0, voxel_count),
-    // so extra descriptors are never accessed; this avoids needing descriptor indexing features.
-    let mut padded: Vec<Arc<ImageView>> = image_views.to_vec();
-    while padded.len() < MAX_GRIDS {
-        padded.push(padded[0].clone());
+    let bindings = layout.bindings();
+
+    let mut writes: Vec<WriteDescriptorSet> = Vec::new();
+
+    if bindings.contains_key(&BINDING_VOXEL_IMAGES) {
+        // Pad to MAX_GRIDS by repeating the first view. Shader only indexes [0, voxel_count)
+        // so extra descriptors are never accessed; this avoids needing descriptor indexing features.
+        let mut padded: Vec<Arc<ImageView>> = image_views.to_vec();
+        while padded.len() < MAX_GRIDS {
+            padded.push(padded[0].clone());
+        }
+        writes.push(WriteDescriptorSet::image_view_array(
+            BINDING_VOXEL_IMAGES,
+            0,
+            padded.into_iter(),
+        ));
     }
-    let mut padded_colors: Vec<Arc<ImageView>> = color_index_views.to_vec();
-    while padded_colors.len() < MAX_GRIDS {
-        padded_colors.push(padded_colors[0].clone());
-    }
-    let mut padded_masks: Vec<Arc<ImageView>> = tile_mask_views.to_vec();
-    while padded_masks.len() < MAX_GRIDS {
-        padded_masks.push(padded_masks[0].clone());
-    }
-    let writes = [
-        WriteDescriptorSet::image_view_array(BINDING_VOXEL_IMAGES, 0, padded.iter().cloned()),
-        WriteDescriptorSet::image_view_array(
+
+    if bindings.contains_key(&BINDING_COLOR_INDICES) {
+        let mut padded_colors: Vec<Arc<ImageView>> = color_index_views.to_vec();
+        while padded_colors.len() < MAX_GRIDS {
+            padded_colors.push(padded_colors[0].clone());
+        }
+        writes.push(WriteDescriptorSet::image_view_array(
             BINDING_COLOR_INDICES,
             0,
-            padded_colors.iter().cloned(),
-        ),
-        WriteDescriptorSet::image_view_array(BINDING_TILE_MASK, 0, padded_masks.iter().cloned()),
-        WriteDescriptorSet::buffer(BINDING_PALETTE_BUFFER, palette_buffer.clone()),
-        WriteDescriptorSet::buffer(BINDING_TILE_PAYLOADS, tile_payload_buffer.clone()),
-        WriteDescriptorSet::buffer(BINDING_GRID_INFO, grid_info_buffer.clone()),
-    ];
+            padded_colors.into_iter(),
+        ));
+    }
+
+    if bindings.contains_key(&BINDING_TILE_MASK) {
+        let mut padded_masks: Vec<Arc<ImageView>> = tile_mask_views.to_vec();
+        while padded_masks.len() < MAX_GRIDS {
+            padded_masks.push(padded_masks[0].clone());
+        }
+        writes.push(WriteDescriptorSet::image_view_array(
+            BINDING_TILE_MASK,
+            0,
+            padded_masks.into_iter(),
+        ));
+    }
+
+    if bindings.contains_key(&BINDING_PALETTE_BUFFER) {
+        writes.push(WriteDescriptorSet::buffer(BINDING_PALETTE_BUFFER, palette_buffer.clone()));
+    }
+
+    if bindings.contains_key(&BINDING_TILE_PAYLOADS) {
+        writes.push(WriteDescriptorSet::buffer(BINDING_TILE_PAYLOADS, tile_payload_buffer.clone()));
+    }
+
+    if bindings.contains_key(&BINDING_GRID_INFO) {
+        writes.push(WriteDescriptorSet::buffer(BINDING_GRID_INFO, grid_info_buffer.clone()));
+    }
+
     DescriptorSet::new(descriptor_set_allocator, layout, writes, [])
         .expect("Failed to create voxel descriptor set (array)")
 }
