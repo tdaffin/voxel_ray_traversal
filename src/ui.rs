@@ -35,6 +35,10 @@ impl App {
                         .on_hover_text(
                             "When enabled, grids register as a hit immediately upon entry.\nDisable to require sampling a filled bit first."
                         );
+                    ui.checkbox(&mut self.hit_back, "Hit grid backs")
+                        .on_hover_text(
+                            "When enabled, rays register a hit when they exit a grid without finding a filled voxel."
+                        );
                     if ui
                         .checkbox(&mut self.verbose_logging, "Verbose logging")
                         .on_hover_text("Print detailed palette and compression stats to stdout")

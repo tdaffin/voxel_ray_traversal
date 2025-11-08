@@ -23,6 +23,7 @@ layout(push_constant) uniform PushConstants {
     uint voxel_count;
     uint render_mode;
     uint always_instant;
+    uint hit_back;
 } pc;
 
 layout(set = 0, binding = 0, rgba8) writeonly uniform image2D targetImage;
@@ -229,7 +230,9 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
 
         if (any(greaterThanEqual(coord, dims))) {
             outHit.outOfBounds = true;
-            //hit = true;
+            if (pc.hit_back != 0u) {
+                hit = true;
+            }
             break;
         }
         if (readVoxel(coord, texel, texel_coord, gridIndex))

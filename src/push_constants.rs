@@ -11,6 +11,7 @@ pub struct PushConstants {
     pub voxel_count: u32,
     pub render_mode: u32,
     pub always_instant: u32,
+    pub hit_back: u32,
 }
 
 pub struct PushConstantsInput<'a> {
@@ -19,6 +20,7 @@ pub struct PushConstantsInput<'a> {
     pub render_mode: u32,
     pub light_dir: [f32; 3], // xyz normalized; w ignored
     pub always_instant: bool,
+    pub hit_back: bool,
 }
 
 pub fn build_push_constants(input: PushConstantsInput) -> PushConstants {
@@ -80,5 +82,6 @@ pub fn build_push_constants(input: PushConstantsInput) -> PushConstants {
         voxel_count,
         render_mode: input.render_mode,
         always_instant: input.always_instant as u32,
+        hit_back: input.hit_back as u32,
     }
 }

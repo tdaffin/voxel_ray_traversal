@@ -98,6 +98,7 @@ pub fn render_offscreen_snapshot(
         render_mode: render_mode as u32,
         light_dir: [0.5, 0.8, 0.3],
         always_instant: false,
+        hit_back: false,
     });
 
     let pixel_count = (width * height) as usize;
