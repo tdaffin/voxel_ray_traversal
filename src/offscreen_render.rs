@@ -193,9 +193,13 @@ fn wait_for_voxel_jobs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn offscreen_render_matches_reference() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         let snapshot = render_offscreen_snapshot(256, 256, RenderMode::Shade);
         let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/reference");
         std::fs::create_dir_all(&out_dir).expect("failed to create reference directory");
@@ -229,6 +233,7 @@ mod tests {
     
     #[test]
     fn verify_no_transparent() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         // 220, 100, 30x30
         let snapshot = render_offscreen_snapshot(256, 256, RenderMode::Shade);
         let mut num_transparent = 0;
