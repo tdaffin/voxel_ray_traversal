@@ -261,4 +261,27 @@ mod tests {
         //let actual_path = out_dir.join("no_transparent.actual.png");
         //snapshot.save_png(&actual_path).expect("failed to write actual render output");
     }
+
+    #[test]
+    fn verify_all_green() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        // 84, 105, 11x6
+        let snapshot = cached_snapshot();
+        let mut num_not_green = 0;
+        for y in 105..=111 {
+            for x in 84..=95 {
+                let idx = (y * snapshot.width as usize + x) * 4;
+                let px = &snapshot.pixels[idx..idx + 4];
+                let px32 = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
+                if px32 != 0xFF2A5B21 {
+                    num_not_green += 1;
+                    println!("Pixel at ({},{}) is not green: #{:08X}", x, y, px32);
+                }
+            }
+        }
+        assert_eq!(num_not_green, 0, "Found {} non-green pixels in the test area", num_not_green);
+        //let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/reference");
+        //let actual_path = out_dir.join("all_green.actual.png");
+        //snapshot.save_png(&actual_path).expect("failed to write actual render output");
+    }
 }
