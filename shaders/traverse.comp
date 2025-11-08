@@ -402,6 +402,18 @@ void renderSteps(ivec2 pixelCoord, uint steps, uint maxDim) {
     imageStore(targetImage, pixelCoord, vec4(color, 1));
 }
 
+// Provides a non-zero fallback color for rays that miss all voxels.
+vec3 shadeBackground(vec3 dirWorldNorm) {
+    float t = clamp(dirWorldNorm.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 horizon = vec3(0.08, 0.10, 0.16);
+    vec3 zenith = vec3(0.70, 0.82, 0.95);
+    return mix(horizon, zenith, t);
+}
+
+const uint debugX = 180;
+const uint debugY = 86;
+const ivec2 debugCoord = ivec2(debugX, debugY);
+
 // Entry point for the compute shader: casts a ray per pixel, finds the nearest voxel hit, and shades it.
 void main() {
     ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
@@ -537,9 +549,19 @@ void main() {
             // If no hit, visualize steps vs largest grid size
             renderSteps(pixelCoord, totalSteps, largest_size);
         }
-    } else if (hitFound) {
-        vec3 color = calc_color(bestHit);
-        imageStore(targetImage, pixelCoord, vec4(color, 1));
+    } else {
+        vec3 color = vec3(0.0);
+        bool shouldStore = false;
+        if (hitFound) {
+            color = calc_color(bestHit);
+            shouldStore = true;
+        } else if (pc.render_mode == SHADE) {
+            color = shadeBackground(rdNorm);
+            shouldStore = true;
+        }
+        if (shouldStore) {
+            imageStore(targetImage, pixelCoord, vec4(color, 1));
+        }
     }
     //if (pixelCoord == debugCoord) { 
     if (pc.render_mode == DEBUG) {
