@@ -123,6 +123,9 @@ pub enum VoxelJobMessage {
         storage_w: u32,
         storage_h: u32,
         storage_d: u32,
+        tile_mask: Vec<u32>,
+        tile_payloads: Vec<[u32; 4]>,
+        tile_stats: crate::tile_compression::TileCompressionStats,
     },
     PaletteSlice {
         generation: u64,
@@ -157,6 +160,10 @@ pub struct VoxelManager {
     pub color_index_views: Vec<Option<Arc<ImageView>>>,
     pub voxel_pending: Vec<bool>,
     pub voxel_progress: Vec<(usize, usize)>,
+
+    pub tile_masks: Vec<Option<Vec<u32>>>,
+    pub tile_payloads: Vec<Option<Vec<[u32; 4]>>>,
+    pub tile_stats: Vec<Option<crate::tile_compression::TileCompressionStats>>,
 
     placeholder_view: Arc<ImageView>,
     placeholder_color_view: Arc<ImageView>,
@@ -347,6 +354,15 @@ impl VoxelManager {
                 let (dx, dy, dz) = dims_opt.unwrap_or((used_res, used_res, used_res));
                 let (sw, sh, sd) =
                     storage_opt.unwrap_or((used_res / 4, used_res / 4, used_res / 8));
+                let compression = if dx == 0 || dy == 0 || dz == 0 {
+                    crate::tile_compression::TileCompressionResult::default()
+                } else {
+                    crate::tile_compression::classify_tiles(&vox, (dx, dy, dz), (sw, sh, sd))
+                };
+                let tile_mask = compression.mask_entries;
+                let tile_payloads: Vec<[u32; 4]> =
+                    compression.payloads.into_iter().map(|p| p.occupancy).collect();
+                let tile_stats = compression.stats;
                 let _ = txc.send(VoxelJobMessage::Finished {
                     generation: generation_id,
                     index: idx,
@@ -359,6 +375,9 @@ impl VoxelManager {
                     storage_w: sw,
                     storage_h: sh,
                     storage_d: sd,
+                    tile_mask,
+                    tile_payloads,
+                    tile_stats,
                 });
                 // transmit palette slice for .vox models so we can blend custom palette
                 if let Some(pslice) = palette_opt {
@@ -392,6 +411,9 @@ impl VoxelManager {
             color_index_views,
             voxel_pending,
             voxel_progress,
+            tile_masks: vec![None; model_count],
+            tile_payloads: vec![None; model_count],
+            tile_stats: vec![None; model_count],
             placeholder_view,
             placeholder_color_view,
             palette_buffer,
@@ -443,6 +465,9 @@ impl VoxelManager {
                     storage_w,
                     storage_h,
                     storage_d,
+                    tile_mask,
+                    tile_payloads,
+                    tile_stats,
                 } => {
                     if generation != self.voxel_generation || self.cancel_requested {
                         continue;
@@ -469,6 +494,15 @@ impl VoxelManager {
                             dim_z,
                         );
                         self.color_index_views[index] = Some(cview);
+                        if index < self.tile_masks.len() {
+                            self.tile_masks[index] = Some(tile_mask);
+                        }
+                        if index < self.tile_payloads.len() {
+                            self.tile_payloads[index] = Some(tile_payloads);
+                        }
+                        if index < self.tile_stats.len() {
+                            self.tile_stats[index] = Some(tile_stats);
+                        }
                         self.voxel_pending[index] = false;
                         if index < self.grid_resolutions.len() {
                             self.grid_resolutions[index] = resolution; // keep logical base resolution for now
@@ -826,6 +860,15 @@ impl VoxelManager {
         for ps in &mut self.palette_slices {
             *ps = None;
         }
+        for tm in &mut self.tile_masks {
+            *tm = None;
+        }
+        for tp in &mut self.tile_payloads {
+            *tp = None;
+        }
+        for ts in &mut self.tile_stats {
+            *ts = None;
+        }
         self.palette_bases.fill(0);
         self.palette_lens.fill(0);
         let gi = [GridInfo {
@@ -897,6 +940,20 @@ impl VoxelManager {
                             );
                         }
                         if !cancelled.load(Ordering::Relaxed) {
+                            let compression =
+                                if result.dim_x == 0 || result.dim_y == 0 || result.dim_z == 0 {
+                                    crate::tile_compression::TileCompressionResult::default()
+                                } else {
+                                    crate::tile_compression::classify_tiles(
+                                        &vox,
+                                        (result.dim_x, result.dim_y, result.dim_z),
+                                        (result.storage_w, result.storage_h, result.storage_d),
+                                    )
+                                };
+                            let tile_mask = compression.mask_entries;
+                            let tile_payloads: Vec<[u32; 4]> =
+                                compression.payloads.into_iter().map(|p| p.occupancy).collect();
+                            let tile_stats = compression.stats;
                             let _ = txc.send(VoxelJobMessage::Finished {
                                 generation: gen_thread,
                                 index: idx,
@@ -909,6 +966,9 @@ impl VoxelManager {
                                 storage_w: result.storage_w,
                                 storage_h: result.storage_h,
                                 storage_d: result.storage_d,
+                                tile_mask,
+                                tile_payloads,
+                                tile_stats,
                             });
                             if !palette_slice.is_empty() {
                                 let _ = txc.send(VoxelJobMessage::PaletteSlice {
@@ -937,6 +997,19 @@ impl VoxelManager {
                             1.0,
                         ]];
                         if !cancelled.load(Ordering::Relaxed) {
+                            let compression = if dim_x == 0 || dim_y == 0 || dim_z == 0 {
+                                crate::tile_compression::TileCompressionResult::default()
+                            } else {
+                                crate::tile_compression::classify_tiles(
+                                    &vox,
+                                    (dim_x, dim_y, dim_z),
+                                    storage,
+                                )
+                            };
+                            let tile_mask = compression.mask_entries;
+                            let tile_payloads: Vec<[u32; 4]> =
+                                compression.payloads.into_iter().map(|p| p.occupancy).collect();
+                            let tile_stats = compression.stats;
                             let _ = txc.send(VoxelJobMessage::Finished {
                                 generation: gen_thread,
                                 index: idx,
@@ -949,6 +1022,9 @@ impl VoxelManager {
                                 storage_w: storage.0,
                                 storage_h: storage.1,
                                 storage_d: storage.2,
+                                tile_mask,
+                                tile_payloads,
+                                tile_stats,
                             });
                             let _ = txc.send(VoxelJobMessage::PaletteSlice {
                                 generation: gen_thread,

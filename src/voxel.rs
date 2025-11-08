@@ -15,6 +15,19 @@ use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, Standar
 use vulkano::pipeline::Pipeline; // for layout() method
 use vulkano::pipeline::compute::ComputePipeline;
 
+/// Descriptor set index for voxel resources in the traversal pipeline.
+#[allow(dead_code)]
+pub const VOXEL_DESCRIPTOR_SET_INDEX: u32 = 1;
+pub const BINDING_VOXEL_IMAGES: u32 = 0;
+pub const BINDING_COLOR_INDICES: u32 = 1;
+pub const BINDING_PALETTE_BUFFER: u32 = 2;
+pub const BINDING_GRID_INFO: u32 = 3;
+/// Reserved binding numbers for upcoming tile mask + payload resources.
+#[allow(dead_code)]
+pub const BINDING_TILE_MASK: u32 = 4;
+#[allow(dead_code)]
+pub const BINDING_TILE_PAYLOADS: u32 = 5;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, BufferContents)]
 pub struct GridInfo {
@@ -98,10 +111,14 @@ pub fn build_voxel_descriptor_set(
         padded_colors.push(padded_colors[0].clone());
     }
     let writes = [
-        WriteDescriptorSet::image_view_array(0, 0, padded.iter().cloned()),
-        WriteDescriptorSet::image_view_array(1, 0, padded_colors.iter().cloned()),
-        WriteDescriptorSet::buffer(2, palette_buffer.clone()),
-        WriteDescriptorSet::buffer(3, grid_info_buffer.clone()),
+        WriteDescriptorSet::image_view_array(BINDING_VOXEL_IMAGES, 0, padded.iter().cloned()),
+        WriteDescriptorSet::image_view_array(
+            BINDING_COLOR_INDICES,
+            0,
+            padded_colors.iter().cloned(),
+        ),
+        WriteDescriptorSet::buffer(BINDING_PALETTE_BUFFER, palette_buffer.clone()),
+        WriteDescriptorSet::buffer(BINDING_GRID_INFO, grid_info_buffer.clone()),
     ];
     DescriptorSet::new(descriptor_set_allocator, layout, writes, [])
         .expect("Failed to create voxel descriptor set (array)")

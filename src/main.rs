@@ -16,6 +16,7 @@ mod push_constants;
 mod render_mode;
 mod rendering;
 mod swapchain_manager;
+mod tile_compression;
 mod ui;
 mod voxel;
 mod voxel_facade;

@@ -19,11 +19,13 @@
     - Bit 30: uniform-flag (1 = uniform tile, payload index encodes palette/material id; 0 = non-uniform).
     - Bit 31: empty-flag (1 = empty tile, remaining bits ignored).
   - Reserved indices 0/1 for sentinel values if needed; adjust host-side offsets accordingly.
+  - Binding plan: set `1`, binding `4` (matches reserved constants in `voxel.rs`).
 - **Tile payload buffer (new SSBO):**
   - Array of structs containing:
     - `uvec4 occupancy_words;` // four 32-bit lanes, same as current packed texel.
     - `uvec4 palette_words;` // optional if palette indices remain image-based; include only if helps coherence.
   - Only populated for non-uniform tiles.
+  - Binding plan: set `1`, binding `5`.
 - **Existing occupancy image:**
   - Becomes optional; retained temporarily for incremental rollout and fallback.
 
