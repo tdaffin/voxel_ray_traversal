@@ -229,7 +229,7 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
 
         if (any(greaterThanEqual(coord, dims))) {
             outHit.outOfBounds = true;
-            hit = true;
+            //hit = true;
             break;
         }
         if (readVoxel(coord, texel, texel_coord, gridIndex))
