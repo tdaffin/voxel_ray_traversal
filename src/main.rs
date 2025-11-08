@@ -12,6 +12,7 @@ mod hot_reload;
 mod input_controller;
 mod log_config;
 mod model_discovery;
+mod offscreen_render;
 mod pipelines;
 mod push_constants;
 mod render_mode;

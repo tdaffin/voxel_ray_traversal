@@ -10,7 +10,7 @@ use vulkano::{
         Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures, Queue, QueueCreateInfo,
         physical::PhysicalDeviceType,
     },
-    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
+    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo, InstanceExtensions},
     swapchain::Surface,
 };
 use winit::event_loop::EventLoop;
@@ -46,6 +46,27 @@ impl GpuContext {
             command_buffer_allocator,
         }
     }
+
+    /// Create a GPU context without relying on a presentation surface.
+    /// Useful for offline rendering and tests that only require compute dispatch.
+    pub fn headless() -> Self {
+        let instance = create_headless_instance();
+        let (physical_device, queue_family_index, mut device_extensions) =
+            select_headless_physical_and_queue(&instance);
+        let (device, queue) =
+            create_device(physical_device, queue_family_index, &mut device_extensions);
+        let (memory_allocator, descriptor_set_allocator, command_buffer_allocator) =
+            get_allocators(&device);
+
+        Self {
+            instance,
+            device,
+            queue,
+            memory_allocator,
+            descriptor_set_allocator,
+            command_buffer_allocator,
+        }
+    }
 }
 
 fn create_instance(event_loop: &EventLoop<()>) -> Arc<Instance> {
@@ -62,6 +83,23 @@ fn create_instance(event_loop: &EventLoop<()>) -> Arc<Instance> {
         },
     )
     .expect("Instance creation failed")
+}
+
+fn create_headless_instance() -> Arc<Instance> {
+    let library = VulkanLibrary::new().expect("Failed to load Vulkan library");
+    let mut enabled_extensions = InstanceExtensions::empty();
+    // Enable portability extensions so the vulkan loader exposes MoltenVK on macOS.
+    enabled_extensions.khr_portability_enumeration = true;
+    enabled_extensions.ext_debug_utils = true;
+    Instance::new(
+        library,
+        InstanceCreateInfo {
+            flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
+            enabled_extensions,
+            ..Default::default()
+        },
+    )
+    .expect("Headless instance creation failed")
 }
 
 fn select_physical_and_queue(
@@ -104,6 +142,50 @@ fn select_physical_and_queue(
 
     println!(
         "Using device: {} (type: {:?})",
+        physical_device.properties().device_name,
+        physical_device.properties().device_type,
+    );
+
+    (physical_device, queue_family_index, device_extensions)
+}
+
+fn select_headless_physical_and_queue(
+    instance: &Arc<Instance>,
+) -> (Arc<PhysicalDevice>, u32, DeviceExtensions) {
+    let mut device_extensions = DeviceExtensions::empty();
+
+    if instance.api_version() < Version::V1_3 {
+        device_extensions.khr_dynamic_rendering = true;
+    }
+
+    let (physical_device, queue_family_index) = instance
+        .enumerate_physical_devices()
+        .expect("Failed to enumerate physical devices")
+        .filter(|p| {
+            p.api_version() >= Version::V1_3 || p.supported_extensions().khr_dynamic_rendering
+        })
+        .filter(|p| p.supported_extensions().contains(&device_extensions))
+        .filter_map(|p| {
+            p.queue_family_properties()
+                .iter()
+                .enumerate()
+                .position(|(_, q)| {
+                    q.queue_flags.intersects(QueueFlags::GRAPHICS | QueueFlags::COMPUTE)
+                })
+                .map(|i| (p, i as u32))
+        })
+        .min_by_key(|(p, _)| match p.properties().device_type {
+            PhysicalDeviceType::DiscreteGpu => 0,
+            PhysicalDeviceType::IntegratedGpu => 1,
+            PhysicalDeviceType::VirtualGpu => 2,
+            PhysicalDeviceType::Cpu => 3,
+            PhysicalDeviceType::Other => 4,
+            _ => 5,
+        })
+        .expect("No suitable headless physical device found");
+
+    println!(
+        "Using device (headless): {} (type: {:?})",
         physical_device.properties().device_name,
         physical_device.properties().device_type,
     );
