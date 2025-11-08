@@ -35,6 +35,13 @@ impl App {
                         .on_hover_text(
                             "When enabled, grids register as a hit immediately upon entry.\nDisable to require sampling a filled bit first."
                         );
+                    if ui
+                        .checkbox(&mut self.verbose_logging, "Verbose logging")
+                        .on_hover_text("Print detailed palette and compression stats to stdout")
+                        .changed()
+                    {
+                        crate::log_config::set_verbose_logging(self.verbose_logging);
+                    }
                     ui.separator();
                     let max_grids = (self.voxel.manager.models.len() + 1).max(1) as u32;
                     ui.add(

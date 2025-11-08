@@ -105,7 +105,7 @@ pub fn vox_to_voxels(
         colors[(z * sy + y) * sx + x] = mapped_local;
     }
 
-    if !used_colors.is_empty() {
+    if crate::log_config::verbose_logging() && !used_colors.is_empty() {
         let mut usage_counts = vec![0usize; used_colors.len()];
         for &li in &colors {
             if let Some(entry) = usage_counts.get_mut(li as usize) {

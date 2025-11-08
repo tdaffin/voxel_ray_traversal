@@ -100,6 +100,7 @@ impl AppBuilder {
             self.render_scale,
             input,
             FrameTimer::new(),
+            false,
         )
     }
 }

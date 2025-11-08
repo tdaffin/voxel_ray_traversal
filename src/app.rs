@@ -41,6 +41,7 @@ pub struct App {
     pub(crate) render_scale: f32,
     pub(crate) light_dir: [f32; 3],
     pub(crate) always_instant: bool,
+    pub(crate) verbose_logging: bool,
 
     input: InputController,
     frame_timer: FrameTimer,
@@ -52,9 +53,9 @@ impl App {
     pub(crate) fn from_parts(
         gpu: GpuContext, pipelines: PipelineManager, voxel: VoxelSystem,
         future_grid_resolutions: Vec<u32>, camera: Camera, render_mode: RenderMode,
-        render_scale: f32, input: InputController, frame_timer: FrameTimer,
+        render_scale: f32, input: InputController, frame_timer: FrameTimer, verbose_logging: bool,
     ) -> Self {
-        App {
+        let app = App {
             gpu,
             pipelines,
             voxel,
@@ -64,10 +65,13 @@ impl App {
             render_scale,
             light_dir: [0.5, 0.8, 0.3],
             always_instant: false,
+            verbose_logging,
             input,
             frame_timer,
             rcx: None,
-        }
+        };
+        crate::log_config::set_verbose_logging(app.verbose_logging);
+        app
     }
     pub fn new(event_loop: &EventLoop<()>) -> Self {
         AppBuilder::default().build(event_loop)
