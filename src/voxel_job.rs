@@ -23,8 +23,9 @@ use crate::{
     hot_reload::HotReloadComputePipeline,
     model_discovery::{DiscoveredModel, discover_models},
     voxel::{
-        GridInfo, build_voxel_descriptor_set, create_empty_voxel_placeholder,
-        create_grid_info_buffer, create_voxel_image_view,
+        GridInfo, TilePayloadGpu, build_voxel_descriptor_set, create_empty_voxel_placeholder,
+        create_grid_info_buffer, create_tile_mask_image_view, create_tile_payload_buffer,
+        create_voxel_image_view,
     },
     voxelize,
 };
@@ -161,13 +162,15 @@ pub struct VoxelManager {
     pub voxel_pending: Vec<bool>,
     pub voxel_progress: Vec<(usize, usize)>,
 
-    pub tile_masks: Vec<Option<Vec<u32>>>,
+    pub tile_mask_views: Vec<Option<Arc<ImageView>>>,
     pub tile_payloads: Vec<Option<Vec<[u32; 4]>>>,
     pub tile_stats: Vec<Option<crate::tile_compression::TileCompressionStats>>,
 
     placeholder_view: Arc<ImageView>,
     placeholder_color_view: Arc<ImageView>,
+    placeholder_tile_mask_view: Arc<ImageView>,
     palette_buffer: Subbuffer<[[f32; 4]]>,
+    tile_payload_buffer: Subbuffer<[TilePayloadGpu]>,
     // Step8: collect per-grid palette slices (local indices) for compaction.
     palette_slices: Vec<Option<Vec<[f32; 4]>>>,
     palette_bases: Vec<u32>,
@@ -265,6 +268,23 @@ impl VoxelManager {
             ground_dims.1,
             ground_dims.2,
         );
+        let storage_w_placeholder = (initial_resolution / 4).max(1);
+        let storage_h_placeholder = (initial_resolution / 4).max(1);
+        let storage_d_placeholder = (initial_resolution / 8).max(1);
+        let mask_texel_count =
+            (storage_w_placeholder * storage_h_placeholder * storage_d_placeholder).max(1);
+        let placeholder_mask_entries = vec![0u32; mask_texel_count as usize];
+        let placeholder_tile_mask_view = create_tile_mask_image_view(
+            memory_allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            placeholder_mask_entries,
+            storage_w_placeholder,
+            storage_h_placeholder,
+            storage_d_placeholder,
+        );
+        let placeholder_payload_buffer =
+            create_tile_payload_buffer(memory_allocator.clone(), &[TilePayloadGpu::default()]);
         // Initial grid info (single placeholder)
         let gi = [GridInfo {
             resolution: initial_resolution,
@@ -285,7 +305,9 @@ impl VoxelManager {
             render_pipeline,
             std::slice::from_ref(&placeholder_view),
             std::slice::from_ref(&placeholder_color_view),
+            std::slice::from_ref(&placeholder_tile_mask_view),
             palette_buffer.clone(),
+            placeholder_payload_buffer.clone(),
             grid_info_buffer.clone(),
         );
         let (tx, rx) = mpsc::channel();
@@ -411,12 +433,14 @@ impl VoxelManager {
             color_index_views,
             voxel_pending,
             voxel_progress,
-            tile_masks: vec![None; model_count],
+            tile_mask_views: vec![None; model_count],
             tile_payloads: vec![None; model_count],
             tile_stats: vec![None; model_count],
             placeholder_view,
             placeholder_color_view,
+            placeholder_tile_mask_view,
             palette_buffer,
+            tile_payload_buffer: placeholder_payload_buffer,
             palette_slices: vec![None; model_count],
             palette_bases: vec![0; model_count],
             palette_lens: vec![0; model_count],
@@ -494,8 +518,17 @@ impl VoxelManager {
                             dim_z,
                         );
                         self.color_index_views[index] = Some(cview);
-                        if index < self.tile_masks.len() {
-                            self.tile_masks[index] = Some(tile_mask);
+                        if index < self.tile_mask_views.len() {
+                            let mask_view = create_tile_mask_image_view(
+                                memory_allocator.clone(),
+                                command_buffer_allocator.clone(),
+                                queue.clone(),
+                                tile_mask,
+                                storage_w,
+                                storage_h,
+                                storage_d,
+                            );
+                            self.tile_mask_views[index] = Some(mask_view);
                         }
                         if index < self.tile_payloads.len() {
                             self.tile_payloads[index] = Some(tile_payloads);
@@ -628,6 +661,7 @@ impl VoxelManager {
     ) {
         let mut ready: Vec<Arc<ImageView>> = Vec::new();
         let mut ready_colors: Vec<Arc<ImageView>> = Vec::new();
+        let mut ready_masks: Vec<Arc<ImageView>> = Vec::new();
         let mut ready_indices: Vec<usize> = Vec::new();
         for (idx, (voxel_opt, color_opt)) in
             self.voxel_views.iter().zip(self.color_index_views.iter()).enumerate()
@@ -635,6 +669,12 @@ impl VoxelManager {
             if let (Some(v), Some(cv)) = (voxel_opt, color_opt) {
                 ready.push(v.clone());
                 ready_colors.push(cv.clone());
+                let mask_view = self
+                    .tile_mask_views
+                    .get(idx)
+                    .and_then(|opt| opt.clone())
+                    .unwrap_or_else(|| self.placeholder_tile_mask_view.clone());
+                ready_masks.push(mask_view);
                 ready_indices.push(idx);
             }
         }
@@ -747,7 +787,18 @@ impl VoxelManager {
         self.palette_buffer =
             crate::voxel::create_palette_buffer(memory_allocator.clone(), &compact);
 
+        let mut payloads_gpu: Vec<TilePayloadGpu> = Vec::new();
         for (descriptor_idx, &orig_index) in ready_indices.iter().enumerate() {
+            let base = payloads_gpu.len() as u32;
+            infos[descriptor_idx].tile_payload_base = base;
+            if let Some(payloads) = self.tile_payloads.get(orig_index).and_then(|opt| opt.as_ref())
+            {
+                infos[descriptor_idx].tile_payload_len = payloads.len() as u32;
+                payloads_gpu
+                    .extend(payloads.iter().map(|words| TilePayloadGpu { occupancy: *words }));
+            } else {
+                infos[descriptor_idx].tile_payload_len = 0;
+            }
             infos[descriptor_idx].palette_base =
                 self.palette_bases.get(orig_index).copied().unwrap_or(0);
             infos[descriptor_idx].palette_len =
@@ -755,7 +806,7 @@ impl VoxelManager {
         }
 
         if let Some(transform) = ground_transform_opt {
-            let ground_info = GridInfo {
+            let mut ground_info = GridInfo {
                 resolution: self.ground_resolution,
                 dim_x: self.ground_dims.0,
                 dim_y: self.ground_dims.1,
@@ -768,10 +819,19 @@ impl VoxelManager {
                 grid_to_world: transform,
                 ..GridInfo::default()
             };
+            ground_info.tile_payload_base = payloads_gpu.len() as u32;
+            ground_info.tile_payload_len = 0;
             ready.push(self.ground_voxel_view.clone());
             ready_colors.push(self.ground_color_view.clone());
+            ready_masks.push(self.placeholder_tile_mask_view.clone());
             infos.push(ground_info);
         }
+
+        if payloads_gpu.is_empty() {
+            payloads_gpu.push(TilePayloadGpu::default());
+        }
+        self.tile_payload_buffer =
+            create_tile_payload_buffer(memory_allocator.clone(), &payloads_gpu);
 
         let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &infos);
         self.active_voxel_grids = ready.len() as u32;
@@ -780,7 +840,9 @@ impl VoxelManager {
             render_pipeline,
             &ready,
             &ready_colors,
+            &ready_masks,
             self.palette_buffer.clone(),
+            self.tile_payload_buffer.clone(),
             grid_info_buffer,
         );
     }
@@ -860,7 +922,7 @@ impl VoxelManager {
         for ps in &mut self.palette_slices {
             *ps = None;
         }
-        for tm in &mut self.tile_masks {
+        for tm in &mut self.tile_mask_views {
             *tm = None;
         }
         for tp in &mut self.tile_payloads {
@@ -885,12 +947,16 @@ impl VoxelManager {
             ..GridInfo::default()
         }];
         let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
+        self.tile_payload_buffer =
+            create_tile_payload_buffer(memory_allocator.clone(), &[TilePayloadGpu::default()]);
         self.voxel_set = build_voxel_descriptor_set(
             descriptor_set_allocator.clone(),
             render_pipeline,
             std::slice::from_ref(&self.placeholder_view),
             std::slice::from_ref(&self.placeholder_color_view),
+            std::slice::from_ref(&self.placeholder_tile_mask_view),
             self.palette_buffer.clone(),
+            self.tile_payload_buffer.clone(),
             grid_info_buffer,
         );
         let (tx, rx) = mpsc::channel();

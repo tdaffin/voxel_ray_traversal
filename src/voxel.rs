@@ -22,11 +22,14 @@ pub const BINDING_VOXEL_IMAGES: u32 = 0;
 pub const BINDING_COLOR_INDICES: u32 = 1;
 pub const BINDING_PALETTE_BUFFER: u32 = 2;
 pub const BINDING_GRID_INFO: u32 = 3;
-/// Reserved binding numbers for upcoming tile mask + payload resources.
-#[allow(dead_code)]
 pub const BINDING_TILE_MASK: u32 = 4;
-#[allow(dead_code)]
 pub const BINDING_TILE_PAYLOADS: u32 = 5;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, BufferContents)]
+pub struct TilePayloadGpu {
+    pub occupancy: [u32; 4],
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, BufferContents)]
@@ -41,9 +44,9 @@ pub struct GridInfo {
     pub storage_d: u32,    // packed voxel texel depth (resolution/8 currently)
     pub palette_base: u32, // starting index into global palette buffer
     pub palette_len: u32,  // number of valid palette entries for this grid
-    pub _padding0: u32,
-    pub _padding1: u32,
-    pub _padding2: u32,
+    pub tile_payload_base: u32, // base index into tile payload buffer (units of TilePayloadGpu)
+    pub tile_payload_len: u32, // number of payload entries for this grid
+    pub compression_flags: u32, // reserved for future features (e.g., mask modes)
     pub grid_to_world: [[f32; 4]; 4],
 }
 
@@ -59,9 +62,9 @@ impl Default for GridInfo {
             storage_d: 0,
             palette_base: 0,
             palette_len: 0,
-            _padding0: 0,
-            _padding1: 0,
-            _padding2: 0,
+            tile_payload_base: 0,
+            tile_payload_len: 0,
+            compression_flags: 0,
             grid_to_world: [
                 [1.0, 0.0, 0.0, 0.0],
                 [0.0, 1.0, 0.0, 0.0],
@@ -94,7 +97,8 @@ pub fn create_grid_info_buffer(
 pub fn build_voxel_descriptor_set(
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     render_pipeline: &ComputePipeline, image_views: &[Arc<ImageView>],
-    color_index_views: &[Arc<ImageView>], palette_buffer: Subbuffer<[[f32; 4]]>,
+    color_index_views: &[Arc<ImageView>], tile_mask_views: &[Arc<ImageView>],
+    palette_buffer: Subbuffer<[[f32; 4]]>, tile_payload_buffer: Subbuffer<[TilePayloadGpu]>,
     grid_info_buffer: Subbuffer<[GridInfo]>,
 ) -> Arc<DescriptorSet> {
     assert!(!image_views.is_empty(), "Need at least one voxel image view");
@@ -110,6 +114,10 @@ pub fn build_voxel_descriptor_set(
     while padded_colors.len() < MAX_GRIDS {
         padded_colors.push(padded_colors[0].clone());
     }
+    let mut padded_masks: Vec<Arc<ImageView>> = tile_mask_views.to_vec();
+    while padded_masks.len() < MAX_GRIDS {
+        padded_masks.push(padded_masks[0].clone());
+    }
     let writes = [
         WriteDescriptorSet::image_view_array(BINDING_VOXEL_IMAGES, 0, padded.iter().cloned()),
         WriteDescriptorSet::image_view_array(
@@ -117,7 +125,9 @@ pub fn build_voxel_descriptor_set(
             0,
             padded_colors.iter().cloned(),
         ),
+        WriteDescriptorSet::image_view_array(BINDING_TILE_MASK, 0, padded_masks.iter().cloned()),
         WriteDescriptorSet::buffer(BINDING_PALETTE_BUFFER, palette_buffer.clone()),
+        WriteDescriptorSet::buffer(BINDING_TILE_PAYLOADS, tile_payload_buffer.clone()),
         WriteDescriptorSet::buffer(BINDING_GRID_INFO, grid_info_buffer.clone()),
     ];
     DescriptorSet::new(descriptor_set_allocator, layout, writes, [])
@@ -243,6 +253,74 @@ pub fn create_palette_buffer(
     )
     .expect("Failed to create palette buffer");
     buffer
+}
+
+/// Create a 3D image view storing per-tile compression metadata (one u32 per 4×4×8 tile).
+pub fn create_tile_mask_image_view(
+    memory_allocator: Arc<StandardMemoryAllocator>,
+    command_buffer_allocator: Arc<
+        vulkano::command_buffer::allocator::StandardCommandBufferAllocator,
+    >,
+    queue: Arc<Queue>, mask_entries: Vec<u32>, storage_w: u32, storage_h: u32, storage_d: u32,
+) -> Arc<ImageView> {
+    let image = Image::new(
+        memory_allocator.clone(),
+        ImageCreateInfo {
+            image_type: ImageType::Dim3d,
+            format: vulkano::format::Format::R32_UINT,
+            extent: [storage_w, storage_h, storage_d],
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_DST,
+            ..Default::default()
+        },
+        AllocationCreateInfo::default(),
+    )
+    .expect("Failed to create tile mask image");
+
+    let src_buffer = Buffer::from_iter(
+        memory_allocator.clone(),
+        BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        mask_entries,
+    )
+    .expect("Failed to create tile mask staging buffer");
+
+    let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
+        command_buffer_allocator.clone(),
+        queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    )
+    .expect("Failed to create command buffer builder (tile mask)");
+    command_buffer_builder
+        .clear_color_image(ClearColorImageInfo::image(image.clone()))
+        .unwrap()
+        .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(src_buffer, image.clone()))
+        .unwrap();
+    let _ = command_buffer_builder.build().unwrap().execute(queue.clone()).unwrap();
+
+    ImageView::new(image.clone(), vulkano::image::view::ImageViewCreateInfo::from_image(&image))
+        .expect("Failed to create tile mask image view")
+}
+
+/// Create a storage buffer containing all dense tile payload words.
+pub fn create_tile_payload_buffer(
+    memory_allocator: Arc<StandardMemoryAllocator>, payloads: &[TilePayloadGpu],
+) -> Subbuffer<[TilePayloadGpu]> {
+    let usage = BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_DST;
+    Buffer::from_iter(
+        memory_allocator,
+        BufferCreateInfo { usage, ..Default::default() },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        payloads.iter().cloned(),
+    )
+    .expect("Failed to create tile payload buffer")
 }
 
 /// Create an empty placeholder voxel image view (all zeros) so the app can start immediately

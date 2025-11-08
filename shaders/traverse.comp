@@ -10,6 +10,11 @@ const uint DEPTH = 4;
 const uint SHADE = 5; // New: shaded lighting + simple AO (update host RenderMode enum accordingly)
 const uint DEBUG = 6;
 
+const uint TILE_EMPTY_BIT = 1u << 31;
+const uint TILE_UNIFORM_BIT = 1u << 30;
+const uint TILE_UNIFORM_VALUE_BIT = 1u << 0;
+const uint TILE_PAYLOAD_INDEX_MASK = 0x3FFFFFFFu;
+
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(push_constant) uniform PushConstants {
@@ -28,6 +33,7 @@ layout(set = 1, binding = 0, rgba32ui) readonly uniform uimage3D voxelImages[MAX
 // Per-voxel palette index (R8_UINT) stored in R component of each texel.
 // Future enhancement: add a small palette buffer (e.g. SSBO of vec4) so index -> color lookup supports custom materials.
 layout(set = 1, binding = 1, r8ui) readonly uniform uimage3D voxelColorIndices[MAX_GRIDS];
+layout(set = 1, binding = 4, r32ui) readonly uniform uimage3D tileMaskImages[MAX_GRIDS];
 // Palette buffer: 256 RGBA colors (can be fewer; unused entries ignored)
 layout(set = 1, binding = 2) readonly buffer PaletteBuffer {
     vec4 palette[]; // size announced by host; expected <= 256
@@ -43,12 +49,15 @@ struct GridInfo {
     uint storageD;   // packed texel depth (currently resolution/8)
     uint paletteBase; // starting index into palette buffer
     uint paletteLen;  // number of valid entries for this grid
-    uint _padding0;   // pad to 16-byte alignment for subsequent matrix
-    uint _padding1;
-    uint _padding2;
+    uint tilePayloadBase; // base index into dense tile payload buffer
+    uint tilePayloadLen;  // number of dense payload entries for this grid
+    uint compressionFlags; // reserved for future
     mat4 gridToWorld; // transforms voxel-local coordinates to world space
 };
 layout(set = 1, binding = 3) readonly buffer GridInfoBuffer { GridInfo gridInfos[]; };
+layout(set = 1, binding = 5) readonly buffer TilePayloadBuffer {
+    uvec4 words[];
+} tilePayloadBuffer;
 
 // https://www.shadertoy.com/view/WlfXRN
 vec3 inferno(float t) {
@@ -72,12 +81,29 @@ vec3 stepsToInferno(uint steps, uint start, uint end) {
 // Returns true if the voxel at `coord` is filled, updating `texel` and `texel_coord` if a new block is fetched.
 bool readVoxel(uvec3 coord, inout uvec4 texel, inout ivec3 texel_coord, int gridIndex) {
     // Uses per-grid storage block dimensions (4x4x8 voxels per texel) independent of cubic "resolution".
-    ivec3 new_texel_coord = ivec3(coord.x / 4, coord.y / 4, coord.z / 8);
+    ivec3 new_texel_coord = ivec3(int(coord.x) / 4, int(coord.y) / 4, int(coord.z) / 8);
     if (new_texel_coord != texel_coord) {
         texel_coord = new_texel_coord;
-        texel = imageLoad(voxelImages[gridIndex], texel_coord);
+        uint mask_entry = imageLoad(tileMaskImages[gridIndex], texel_coord).r;
+        if ((mask_entry & TILE_EMPTY_BIT) != 0u) {
+            texel = uvec4(0);
+        } else if ((mask_entry & TILE_UNIFORM_BIT) != 0u) {
+            uint uniform_value = mask_entry & TILE_UNIFORM_VALUE_BIT;
+            texel = (uniform_value != 0u) ? uvec4(0xFFFFFFFFu) : uvec4(0);
+        } else {
+            uint local_index = mask_entry & TILE_PAYLOAD_INDEX_MASK;
+            uint payload_len = gridInfos[gridIndex].tilePayloadLen;
+            if (local_index < payload_len) {
+                uint payload_index = gridInfos[gridIndex].tilePayloadBase + local_index;
+                texel = tilePayloadBuffer.words[payload_index];
+            } else {
+                texel = uvec4(0);
+            }
+        }
     }
-    return bool(texel[coord.x % 4] >> ((coord.y % 4) + (coord.z % 8) * 4) & 1u);
+    uint lane = coord.x % 4u;
+    uint bit_index = (coord.y % 4u) + (coord.z % 8u) * 4u;
+    return ((texel[lane] >> bit_index) & 1u) != 0u;
 }
 
 const float FLT_MAX = 3.4028235e+38;
@@ -162,9 +188,9 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     uvec3 ustep = uvec3(ivec3(sgn_dir));
     vec3 delta = inv_dir * sgn_dir;
 
-    ivec3 texel_coord = ivec3(coord.x / 4, coord.y / 4, coord.z / 8);
-    uvec4 texel = imageLoad(voxelImages[gridIndex], texel_coord);
-    bool initialOccupied = bool(texel[coord.x % 4] >> ((coord.y % 4) + (coord.z % 8) * 4) & 1u);
+    ivec3 texel_coord = ivec3(-1);
+    uvec4 texel = uvec4(0);
+    bool initialOccupied = readVoxel(coord, texel, texel_coord, gridIndex);
     bool hit = (pc.always_instant != 0u) || initialOccupied;
     while (!hit) {
         stepsLocal++;
