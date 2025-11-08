@@ -34,6 +34,22 @@
 			"args": ["run"],
 			"problemMatcher": ["$rustc"],
 			"presentation": { "reveal": "always" }
+		},
+		{
+			"label": "update offscreen reference",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"test",
+				"offscreen_render::tests::offscreen_render_matches_reference"
+			],
+			"options": {
+				"env": {
+					"VOXEL_RENDER_UPDATE": "1"
+				}
+			},
+			"problemMatcher": ["$rustc"],
+			"presentation": { "reveal": "always" }
 		}
 	]
 }
