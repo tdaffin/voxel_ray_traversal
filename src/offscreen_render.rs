@@ -243,7 +243,6 @@ mod tests {
                 }
                 if sum == 0 {
                     num_transparent += 1;
-                    println!("Found 0 pixel at ({},{}) = {:?}", x, y, px);
                 }
             }
         }

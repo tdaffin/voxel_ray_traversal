@@ -80,29 +80,31 @@ vec3 stepsToInferno(uint steps, uint start, uint end) {
 // Reads occupancy of a voxel cell by reusing a cached packed texel when possible.
 // Returns true if the voxel at `coord` is filled, updating `texel` and `texel_coord` if a new block is fetched.
 bool readVoxel(uvec3 coord, inout uvec4 texel, inout ivec3 texel_coord, int gridIndex) {
-    // Uses per-grid storage block dimensions (4x4x8 voxels per texel) independent of cubic "resolution".
     ivec3 new_texel_coord = ivec3(int(coord.x) / 4, int(coord.y) / 4, int(coord.z) / 8);
-    if (new_texel_coord != texel_coord) {
+    if (any(notEqual(new_texel_coord, texel_coord))) {
         texel_coord = new_texel_coord;
         uint mask_entry = imageLoad(tileMaskImages[gridIndex], texel_coord).r;
         if ((mask_entry & TILE_EMPTY_BIT) != 0u) {
             texel = uvec4(0);
-        } else if ((mask_entry & TILE_UNIFORM_BIT) != 0u) {
+            return false;
+        }
+        if ((mask_entry & TILE_UNIFORM_BIT) != 0u) {
             uint uniform_value = mask_entry & TILE_UNIFORM_VALUE_BIT;
             texel = (uniform_value != 0u) ? uvec4(0xFFFFFFFFu) : uvec4(0);
+            return (uniform_value != 0u);
+        }
+        uint local_index = mask_entry & TILE_PAYLOAD_INDEX_MASK;
+        uint payload_len = gridInfos[gridIndex].tilePayloadLen;
+        if (local_index < payload_len) {
+            uint payload_index = gridInfos[gridIndex].tilePayloadBase + local_index;
+            texel = tilePayloadBuffer.words[payload_index];
         } else {
-            uint local_index = mask_entry & TILE_PAYLOAD_INDEX_MASK;
-            uint payload_len = gridInfos[gridIndex].tilePayloadLen;
-            if (local_index < payload_len) {
-                uint payload_index = gridInfos[gridIndex].tilePayloadBase + local_index;
-                texel = tilePayloadBuffer.words[payload_index];
-            } else {
-                texel = uvec4(0);
-            }
+            texel = uvec4(0);
         }
     }
-    uint lane = coord.x % 4u;
-    uint bit_index = (coord.y % 4u) + (coord.z % 8u) * 4u;
+
+    uint lane = coord.x & 3u;
+    uint bit_index = (coord.y & 3u) + ((coord.z & 7u) << 2u);
     return ((texel[lane] >> bit_index) & 1u) != 0u;
 }
 
@@ -182,59 +184,78 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
 
     origin += dir * tmin;
     outHit.entryPoint = origin;
-    uvec3 coord = uvec3(clamp(floor(origin), vec3(0), vec3(vec3(dims) - 1.0)));
-    vec3 t = (coord + 0.5 * (1 + sgn_dir) - origin) * inv_dir;
+    vec3 dimsF = vec3(dims);
+    vec3 maxCell = max(dimsF - vec3(1.0), vec3(0.0));
+    vec3 floored = floor(origin);
+    vec3 clamped = clamp(floored, vec3(0.0), maxCell);
+    ivec3 icoord = ivec3(clamped);
+    uvec3 coord = uvec3(icoord);
+    vec3 t = (vec3(coord) + 0.5 * (vec3(1.0) + sgn_dir) - origin) * inv_dir;
 
-    uvec3 ustep = uvec3(ivec3(sgn_dir));
+    ivec3 istep = ivec3(sgn_dir);
     vec3 delta = inv_dir * sgn_dir;
+    ivec3 bounds = ivec3(dims);
 
     ivec3 texel_coord = ivec3(-1);
     uvec4 texel = uvec4(0);
     bool initialOccupied = readVoxel(coord, texel, texel_coord, gridIndex);
     bool hit = (pc.always_instant != 0u) || initialOccupied;
+    if (!hit && dims.x == 1u && dims.y == 1u && dims.z == 1u) {
+        uint mask_entry = imageLoad(tileMaskImages[gridIndex], ivec3(0)).r;
+        if ((mask_entry & TILE_UNIFORM_BIT) != 0u && (mask_entry & TILE_UNIFORM_VALUE_BIT) != 0u) {
+            coord = uvec3(0);
+            texel_coord = ivec3(0);
+            texel = uvec4(0xFFFFFFFFu);
+            hit = true;
+            initialOccupied = true;
+        }
+    }
     while (!hit) {
         stepsLocal++;
 #ifndef BRANCHLESS_TRAVERSAL
         if (t.x < t.y) {
             if (t.x < t.z) {
-                coord.x += ustep.x;
+                icoord.x += istep.x;
                 t.x += delta.x;
-                stepped_axis = 0;
+                stepped_axis = 0u;
             } else {
-                coord.z += ustep.z;
+                icoord.z += istep.z;
                 t.z += delta.z;
-                stepped_axis = 2;
+                stepped_axis = 2u;
             }
         } else {
             if (t.y < t.z) {
-                coord.y += ustep.y;
+                icoord.y += istep.y;
                 t.y += delta.y;
-                stepped_axis = 1;
+                stepped_axis = 1u;
             } else {
-                coord.z += ustep.z;
+                icoord.z += istep.z;
                 t.z += delta.z;
-                stepped_axis = 2;
+                stepped_axis = 2u;
             }
         }
 #else
         // Branchless variant: compute mask selecting axis to advance.
-        uvec3 mask = uvec3(
-            (t.x < t.y && t.x < t.z) ? 1u : 0u,
-            (t.x >= t.y && t.y < t.z) ? 1u : 0u,
-            (t.x >= t.z && t.y >= t.z) ? 1u : 0u
+        ivec3 imask = ivec3(
+            (t.x < t.y && t.x < t.z) ? 1 : 0,
+            (t.x >= t.y && t.y < t.z) ? 1 : 0,
+            (t.x >= t.z && t.y >= t.z) ? 1 : 0
         );
-        coord += ustep * mask;
-        t += delta * mask;
-        stepped_axis = (mask.x != 0u) ? 0u : ((mask.y != 0u) ? 1u : 2u);
+        icoord += istep * imask;
+        vec3 fmask = vec3(imask);
+        t += delta * fmask;
+        stepped_axis = (imask.x != 0) ? 0u : ((imask.y != 0) ? 1u : 2u);
 #endif
 
-        if (any(greaterThanEqual(coord, dims))) {
+        if (icoord.x < 0 || icoord.y < 0 || icoord.z < 0 ||
+            icoord.x >= bounds.x || icoord.y >= bounds.y || icoord.z >= bounds.z) {
             outHit.outOfBounds = true;
             if (pc.hit_back != 0u) {
                 hit = true;
             }
             break;
         }
+        coord = uvec3(icoord);
         if (readVoxel(coord, texel, texel_coord, gridIndex))
             hit = true;
     }
@@ -381,10 +402,6 @@ void renderSteps(ivec2 pixelCoord, uint steps, uint maxDim) {
     imageStore(targetImage, pixelCoord, vec4(color, 1));
 }
 
-const uint debugX = 180;
-const uint debugY = 86;
-const ivec2 debugCoord = ivec2(debugX, debugY);
-
 // Entry point for the compute shader: casts a ray per pixel, finds the nearest voxel hit, and shades it.
 void main() {
     ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
@@ -419,9 +436,29 @@ void main() {
     }
     for (uint g = 0; g < gridCount; g++) {
         uvec3 dims = uvec3(gridInfos[g].dimX, gridInfos[g].dimY, gridInfos[g].dimZ);
-        vec3 inv_dir = 1. / localDirections[g];
-        vec3 t0 = (vec3(0.0) - localOrigins[g]) * inv_dir;
-        vec3 t1 = (vec3(dims) - localOrigins[g]) * inv_dir;
+        vec3 boundsMin = vec3(0.0);
+        vec3 boundsMax = vec3(dims);
+        vec3 t0 = vec3(0.0);
+        vec3 t1 = vec3(0.0);
+        for (int axis = 0; axis < 3; ++axis) {
+            float dirComp = localDirections[g][axis];
+            float originComp = localOrigins[g][axis];
+            float minBound = boundsMin[axis];
+            float maxBound = boundsMax[axis];
+            if (abs(dirComp) < 1e-6) {
+                if (originComp < minBound || originComp > maxBound) {
+                    t0[axis] = FLT_MAX;
+                    t1[axis] = -FLT_MAX;
+                } else {
+                    t0[axis] = -FLT_MAX;
+                    t1[axis] = FLT_MAX;
+                }
+            } else {
+                float inv = 1.0 / dirComp;
+                t0[axis] = (minBound - originComp) * inv;
+                t1[axis] = (maxBound - originComp) * inv;
+            }
+        }
         vec3 tsm = min(t0, t1);
         vec3 tbg = max(t0, t1);
         float tmin = max(0.0, max(tsm.x, max(tsm.y, tsm.z)));
