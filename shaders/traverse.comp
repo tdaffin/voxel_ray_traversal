@@ -29,7 +29,6 @@ layout(set = 0, binding = 0, rgba8) writeonly uniform image2D targetImage;
 // Runtime-sized array of voxel grids (descriptor array only)
 // Fixed-size descriptor array to simplify host binding (avoid runtime descriptor array issues)
 const int MAX_GRIDS = 32;
-layout(set = 1, binding = 0, rgba32ui) readonly uniform uimage3D voxelImages[MAX_GRIDS];
 // Per-voxel palette index (R8_UINT) stored in R component of each texel.
 // Future enhancement: add a small palette buffer (e.g. SSBO of vec4) so index -> color lookup supports custom materials.
 layout(set = 1, binding = 1, r8ui) readonly uniform uimage3D voxelColorIndices[MAX_GRIDS];

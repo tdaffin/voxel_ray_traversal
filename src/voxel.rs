@@ -101,7 +101,6 @@ pub fn build_voxel_descriptor_set(
     palette_buffer: Subbuffer<[[f32; 4]]>, tile_payload_buffer: Subbuffer<[TilePayloadGpu]>,
     grid_info_buffer: Subbuffer<[GridInfo]>,
 ) -> Arc<DescriptorSet> {
-    assert!(!image_views.is_empty(), "Need at least one voxel image view");
     const MAX_GRIDS: usize = 32; // keep in sync with shader
     let layout = render_pipeline.layout().set_layouts()[1].clone();
     let bindings = layout.bindings();
@@ -109,6 +108,7 @@ pub fn build_voxel_descriptor_set(
     let mut writes: Vec<WriteDescriptorSet> = Vec::new();
 
     if bindings.contains_key(&BINDING_VOXEL_IMAGES) {
+        assert!(!image_views.is_empty(), "Need at least one voxel image view");
         // Pad to MAX_GRIDS by repeating the first view. Shader only indexes [0, voxel_count)
         // so extra descriptors are never accessed; this avoids needing descriptor indexing features.
         let mut padded: Vec<Arc<ImageView>> = image_views.to_vec();

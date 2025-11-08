@@ -18,6 +18,7 @@ use vulkano::descriptor_set::{DescriptorSet, allocator::StandardDescriptorSetAll
 use vulkano::device::Queue;
 use vulkano::image::view::ImageView;
 use vulkano::memory::allocator::StandardMemoryAllocator;
+use vulkano::pipeline::Pipeline;
 
 use crate::{
     hot_reload::HotReloadComputePipeline,
@@ -115,7 +116,6 @@ pub enum VoxelJobMessage {
     Finished {
         generation: u64,
         index: usize,
-        data: Vec<u128>,
         colors: Vec<u8>,
         resolution: u32,
         dim_x: u32,
@@ -156,6 +156,7 @@ pub struct VoxelManager {
     pub grid_rotation_speeds: Vec<f32>, // radians per second
     pub future_grid_resolutions: Vec<u32>,
     pub active_voxel_grids: u32,
+    voxel_images_enabled: bool,
 
     pub voxel_views: Vec<Option<Arc<ImageView>>>,
     pub color_index_views: Vec<Option<Arc<ImageView>>>,
@@ -199,6 +200,9 @@ impl VoxelManager {
     ) -> Self {
         let models = discover_models();
         let model_count = models.len().max(1); // avoid div by zero in palette math
+        let voxel_images_enabled = render_pipeline.layout().set_layouts()[1]
+            .bindings()
+            .contains_key(&crate::voxel::BINDING_VOXEL_IMAGES);
         let grid_resolutions = vec![initial_resolution; model_count];
         let grid_dims =
             vec![(initial_resolution, initial_resolution, initial_resolution); model_count];
@@ -215,7 +219,7 @@ impl VoxelManager {
             memory_allocator.clone(),
             command_buffer_allocator.clone(),
             queue.clone(),
-            initial_resolution,
+            if voxel_images_enabled { initial_resolution } else { 8 },
         );
         let placeholder_color_view = crate::voxel::create_empty_color_index_placeholder(
             memory_allocator.clone(),
@@ -248,16 +252,20 @@ impl VoxelManager {
         let ground_resolution = 1u32;
         let ground_dims = (1u32, 1u32, 1u32);
         let ground_storage = (1u32, 1u32, 1u32);
-        let ground_voxels = vec![1u128];
-        let ground_voxel_view = create_voxel_image_view(
-            memory_allocator.clone(),
-            command_buffer_allocator.clone(),
-            queue.clone(),
-            ground_voxels,
-            ground_storage.0,
-            ground_storage.1,
-            ground_storage.2,
-        );
+        let ground_voxel_view = if voxel_images_enabled {
+            let ground_voxels = vec![1u128];
+            create_voxel_image_view(
+                memory_allocator.clone(),
+                command_buffer_allocator.clone(),
+                queue.clone(),
+                ground_voxels,
+                ground_storage.0,
+                ground_storage.1,
+                ground_storage.2,
+            )
+        } else {
+            placeholder_view.clone()
+        };
         let ground_colors = vec![0u8; (ground_dims.0 * ground_dims.1 * ground_dims.2) as usize];
         let ground_color_view = crate::voxel::create_color_index_image_view(
             memory_allocator.clone(),
@@ -388,7 +396,6 @@ impl VoxelManager {
                 let _ = txc.send(VoxelJobMessage::Finished {
                     generation: generation_id,
                     index: idx,
-                    data: vox,
                     colors,
                     resolution: used_res,
                     dim_x: dx,
@@ -429,6 +436,7 @@ impl VoxelManager {
             grid_rotation_speeds,
             future_grid_resolutions,
             active_voxel_grids,
+            voxel_images_enabled,
             voxel_views,
             color_index_views,
             voxel_pending,
@@ -480,7 +488,6 @@ impl VoxelManager {
                 VoxelJobMessage::Finished {
                     generation,
                     index,
-                    data,
                     colors,
                     resolution,
                     dim_x,
@@ -497,16 +504,11 @@ impl VoxelManager {
                         continue;
                     }
                     if index < self.voxel_views.len() {
-                        let view = create_voxel_image_view(
-                            memory_allocator.clone(),
-                            command_buffer_allocator.clone(),
-                            queue.clone(),
-                            data,
-                            storage_w,
-                            storage_h,
-                            storage_d,
+                        assert!(
+                            !self.voxel_images_enabled,
+                            "voxel image binding present but packed data uploads were removed"
                         );
-                        self.voxel_views[index] = Some(view);
+                        self.voxel_views[index] = Some(self.placeholder_view.clone());
                         // Create color index image view
                         let cview = crate::voxel::create_color_index_image_view(
                             memory_allocator.clone(),
@@ -888,12 +890,14 @@ impl VoxelManager {
         if let Some(maxr) = self.grid_resolutions.iter().copied().max() {
             self.voxel_resolution = maxr;
         }
-        self.placeholder_view = create_empty_voxel_placeholder(
-            memory_allocator.clone(),
-            command_buffer_allocator.clone(),
-            queue.clone(),
-            placeholder_resolution,
-        );
+        if self.voxel_images_enabled {
+            self.placeholder_view = create_empty_voxel_placeholder(
+                memory_allocator.clone(),
+                command_buffer_allocator.clone(),
+                queue.clone(),
+                placeholder_resolution,
+            );
+        }
         self.start_background_voxelization(
             descriptor_set_allocator,
             render_pipeline,
@@ -1023,7 +1027,6 @@ impl VoxelManager {
                             let _ = txc.send(VoxelJobMessage::Finished {
                                 generation: gen_thread,
                                 index: idx,
-                                data: vox,
                                 colors,
                                 resolution: result.used_resolution,
                                 dim_x: result.dim_x,
@@ -1079,7 +1082,6 @@ impl VoxelManager {
                             let _ = txc.send(VoxelJobMessage::Finished {
                                 generation: gen_thread,
                                 index: idx,
-                                data: vox,
                                 colors,
                                 resolution: res_for_grid,
                                 dim_x: dim_x,
