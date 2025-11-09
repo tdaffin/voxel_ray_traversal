@@ -228,7 +228,7 @@ fn wait_for_voxel_jobs(
     memory_allocator: Arc<StandardMemoryAllocator>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>, queue: Arc<Queue>,
 ) {
-    let timeout = Duration::from_secs(30);
+    let timeout = Duration::from_secs(90);
     let start = Instant::now();
     loop {
         voxel.manager.poll(
