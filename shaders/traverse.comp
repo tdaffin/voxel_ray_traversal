@@ -355,7 +355,7 @@ vec3 calc_color(HitAttributes hit)
                 uint plen = gridInfos[hit.gridIndex].paletteLen;
                 uint clamped = (plen == 0u) ? 0u : min(local_idx, plen - 1u);
                 uint palette_idx = base + clamped;
-                vec3 voxel_base_color = vec3(1.0);
+                vec3 voxel_base_color = vec3(1.0, 0.0, 1.0);
                 if (palette_idx < palette.length()) {
                     voxel_base_color = palette[palette_idx].rgb;
                 }
