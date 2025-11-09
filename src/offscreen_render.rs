@@ -424,7 +424,7 @@ mod tests {
                 }
             }
         }
-        if (num_not_green > 0) {
+        if num_not_green > 0 {
             let out_dir = out_dir();
             let actual_path = out_dir.join("all_green.actual.png");
             snapshot.save_png(&actual_path).expect("failed to write actual render output");
