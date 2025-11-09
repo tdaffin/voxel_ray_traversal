@@ -32,12 +32,14 @@ use crate::{
     voxel_facade::VoxelSystem,
 };
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct RenderSnapshot {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl RenderSnapshot {
     pub fn save_png(&self, path: &Path) -> ImageResult<()> {
         let img = image::RgbaImage::from_raw(self.width, self.height, self.pixels.clone())
@@ -46,6 +48,7 @@ impl RenderSnapshot {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn render_offscreen_snapshot(
     width: u32, height: u32, render_mode: RenderMode,
 ) -> RenderSnapshot {
