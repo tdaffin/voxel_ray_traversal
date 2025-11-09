@@ -265,11 +265,11 @@ mod tests {
 
     fn full_snapshot() -> &'static RenderSnapshot {
         FULL_SNAPSHOT.get_or_init(|| {
-            make_full_snapshot()
+            make_full_snapshot(RenderMode::Shade)
         })
     }
 
-    fn make_full_snapshot() -> RenderSnapshot {
+    fn make_full_snapshot(render_mode: RenderMode) -> RenderSnapshot {
         let target = Vector3::new(-0.34, -0.28, -0.45);
         let cam_pos = target + Vector3::new(-0.5, 0.5, 0.5);
         let mut camera =
@@ -277,7 +277,7 @@ mod tests {
             [256f64, 256f64], 
             35.0);
         camera.look_at(target);
-        render_offscreen_snapshot(256, 256, RenderMode::Shade,
+        render_offscreen_snapshot(256, 256, render_mode,
             RenderSnapshotOptions {
                 model_selection: SnapshotModelSelection::Named(&["teapot", "chr_cat", "chr_bow", "chr_fox"]),
                 camera: Some(camera),
@@ -407,15 +407,15 @@ mod tests {
     #[test]
     fn verify_all_green() {
         // 84, 105, 11x6
-        let snapshot = full_snapshot();
-        //let mut snapshot = make_full_snapshot();
+        //let snapshot = full_snapshot();
+        let mut snapshot = make_full_snapshot(RenderMode::Debug);
         let mut num_not_green = 0;
         for y in 165..=175 {
             for x in 84..=95 {
                 let idx = (y * snapshot.width as usize + x) * 4;
                 let px = &snapshot.pixels[idx..idx + 4];
                 let px32 = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
-                if px32 != 0xFF2A5B21 {
+                if px32 != 0xFF408C33 {
                     num_not_green += 1;
                     println!("Pixel at ({},{}) is not green: #{:08X}", x, y, px32);
                 }
