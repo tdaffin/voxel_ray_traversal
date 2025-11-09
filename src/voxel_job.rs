@@ -1,5 +1,5 @@
 use std::f32::consts::TAU;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::{
     sync::{
         Arc,
@@ -28,7 +28,6 @@ use crate::{
         create_grid_info_buffer, create_tile_mask_image_view, create_tile_payload_buffer,
         create_voxel_image_view,
     },
-    voxelize,
 };
 
 fn identity_mat4() -> [[f32; 4]; 4] {
@@ -141,6 +140,7 @@ pub enum VoxelJobMessage {
     },
     Cancelled {
         generation: u64,
+        index: usize,
     },
 }
 
@@ -186,10 +186,12 @@ pub struct VoxelManager {
     ground_palette_base: u32,
     ground_palette_len: u32,
     grid_rotation_angles: Vec<f32>,
+    voxel_result_tx: Sender<VoxelJobMessage>,
     voxel_result_rx: Receiver<VoxelJobMessage>,
-    voxel_generation: u64,
-    cancel_requested: bool,
-    voxel_cancel_flag: Arc<AtomicBool>,
+    next_generation: u64,
+    grid_generations: Vec<u64>,
+    grid_cancel_tokens: Vec<Arc<AtomicBool>>,
+    grid_cancel_requested: Vec<bool>,
 }
 
 impl VoxelManager {
@@ -333,113 +335,18 @@ impl VoxelManager {
             grid_info_buffer.clone(),
         );
         let (tx, rx) = mpsc::channel();
-        let voxel_generation = 1u64;
-        for (idx, model) in models.iter().enumerate() {
-            let txc = tx.clone();
-            let path = model.path.clone();
-            let res = grid_resolutions[idx];
-            let generation_id = voxel_generation;
-            // Legacy base_palette_index removed; indices now local per grid until compaction.
-            thread::spawn(move || {
-                let palette_span: u8 = u8::MAX; // allow .vox models to retain all colors
-                let (vox, colors, palette_opt, dims_opt, storage_opt) =
-                    if path.extension().and_then(|e| e.to_str()) == Some("vox") {
-                        if !path.exists() {
-                            eprintln!("[voxel] .vox file missing: {}", path.display());
-                            (
-                                vec![0u128; (res as usize).pow(3) / 128],
-                                vec![0u8; (res as usize).pow(3)],
-                                None,
-                                None,
-                                None,
-                            )
-                        } else if let Some(result) =
-                            crate::voxelize_vox::vox_to_voxels(&path, None, palette_span)
-                        {
-                            let v = result.voxels;
-                            let c = result.colors;
-                            let p = result.palette;
-                            let dims_tuple = (result.dim_x, result.dim_y, result.dim_z);
-                            // Currently .vox path still uses cubic packed storage; derive for now
-                            let storage_tuple =
-                                (result.storage_w, result.storage_h, result.storage_d);
-                            if v.iter().all(|&u| u == 0) {
-                                eprintln!(
-                                    "[voxel] WARNING: .vox produced empty voxel set: {}",
-                                    path.display()
-                                );
-                            }
-                            (v, c, Some(p), Some(dims_tuple), Some(storage_tuple))
-                        } else {
-                            eprintln!("[voxel] Failed to parse .vox file: {}", path.display());
-                            (
-                                vec![0u128; (res as usize).pow(3) / 128],
-                                vec![0u8; (res as usize).pow(3)],
-                                None,
-                                None,
-                                None,
-                            )
-                        }
-                    } else {
-                        let (v, _c, logical, storage) = voxelize::ply_to_voxels(&path, res);
-                        let (dx, dy, dz) = logical;
-                        let color_count = dx as usize * dy as usize * dz as usize;
-                        let colors = vec![0u8; color_count];
-                        let mut rng = seeded_rng_for_path(&path);
-                        let palette_color = [
-                            rng.gen_range(0.0..1.0),
-                            rng.gen_range(0.0..1.0),
-                            rng.gen_range(0.0..1.0),
-                            1.0,
-                        ];
-                        (v, colors, Some(vec![palette_color]), Some(logical), Some(storage))
-                    };
-                let used_res = res; // keep legacy resolution for now (could be dim max)
-                let (dx, dy, dz) = dims_opt.unwrap_or((used_res, used_res, used_res));
-                let (sw, sh, sd) =
-                    storage_opt.unwrap_or((used_res / 4, used_res / 4, used_res / 8));
-                let compression = if dx == 0 || dy == 0 || dz == 0 {
-                    crate::tile_compression::TileCompressionResult::default()
-                } else {
-                    crate::tile_compression::classify_tiles(&vox, (dx, dy, dz), (sw, sh, sd))
-                };
-                let tile_mask = compression.mask_entries;
-                let tile_payloads: Vec<[u32; 4]> =
-                    compression.payloads.into_iter().map(|p| p.occupancy).collect();
-                let tile_stats = compression.stats;
-                let _ = txc.send(VoxelJobMessage::Finished {
-                    generation: generation_id,
-                    index: idx,
-                    colors,
-                    resolution: used_res,
-                    dim_x: dx,
-                    dim_y: dy,
-                    dim_z: dz,
-                    storage_w: sw,
-                    storage_h: sh,
-                    storage_d: sd,
-                    tile_mask,
-                    tile_payloads,
-                    tile_stats,
-                });
-                // transmit palette slice for .vox models so we can blend custom palette
-                if let Some(pslice) = palette_opt {
-                    let _ = txc.send(VoxelJobMessage::PaletteSlice {
-                        generation: generation_id,
-                        index: idx,
-                        colors: pslice,
-                    });
-                }
-            });
-        }
+        let voxel_result_tx = tx.clone();
         drop(tx);
         let voxel_views = vec![None; model_count];
         let color_index_views = vec![None; model_count];
         let voxel_pending = vec![true; model_count];
         let voxel_progress = vec![(0, 0); model_count];
-        let voxel_cancel_flag = Arc::new(AtomicBool::new(false));
         let active_voxel_grids = model_count.max(1) as u32;
-        Self {
+        let grid_generations = vec![0; model_count];
+        let grid_cancel_tokens: Vec<Arc<AtomicBool>> =
+            (0..model_count).map(|_| Arc::new(AtomicBool::new(false))).collect();
+        let grid_cancel_requested = vec![false; model_count];
+        let mut manager = Self {
             models,
             voxel_set,
             voxel_resolution: initial_resolution,
@@ -476,11 +383,28 @@ impl VoxelManager {
             ground_palette_base,
             ground_palette_len,
             grid_rotation_angles,
+            voxel_result_tx,
             voxel_result_rx: rx,
-            voxel_generation,
-            cancel_requested: false,
-            voxel_cancel_flag,
+            next_generation: 1,
+            grid_generations,
+            grid_cancel_tokens,
+            grid_cancel_requested,
+        };
+
+        if manager.models.is_empty() {
+            return manager;
         }
+
+        let all_indices: Vec<usize> = (0..manager.models.len()).collect();
+        manager.prepare_indices_for_regeneration(&all_indices);
+        manager.rebuild_descriptor_set(
+            descriptor_set_allocator,
+            render_pipeline,
+            memory_allocator.clone(),
+        );
+        manager.launch_jobs_for_indices(&all_indices);
+
+        manager
     }
 
     pub fn poll(
@@ -493,7 +417,7 @@ impl VoxelManager {
         while let Ok(msg) = self.voxel_result_rx.try_recv() {
             match msg {
                 VoxelJobMessage::Progress { generation, index, done, total } => {
-                    if generation != self.voxel_generation {
+                    if self.grid_generations.get(index).copied() != Some(generation) {
                         continue;
                     }
                     if index < self.voxel_progress.len() {
@@ -515,6 +439,12 @@ impl VoxelManager {
                     tile_payloads,
                     tile_stats,
                 } => {
+                    if self.grid_generations.get(index).copied() != Some(generation) {
+                        continue;
+                    }
+                    if self.grid_cancel_requested.get(index).copied().unwrap_or(false) {
+                        continue;
+                    }
                     if crate::log_config::verbose_logging() {
                         eprintln!(
                             "[voxel] grid {index} compression: empty={} uniform={} dense={} (payloads={})",
@@ -523,9 +453,6 @@ impl VoxelManager {
                             tile_stats.dense_tiles,
                             tile_payloads.len()
                         );
-                    }
-                    if generation != self.voxel_generation || self.cancel_requested {
-                        continue;
                     }
                     if index < self.voxel_views.len() {
                         assert!(
@@ -563,6 +490,9 @@ impl VoxelManager {
                             self.tile_stats[index] = Some(tile_stats);
                         }
                         self.voxel_pending[index] = false;
+                        if let Some(flag) = self.grid_cancel_requested.get_mut(index) {
+                            *flag = false;
+                        }
                         if index < self.grid_resolutions.len() {
                             self.grid_resolutions[index] = resolution; // keep logical base resolution for now
                         }
@@ -579,7 +509,10 @@ impl VoxelManager {
                     }
                 }
                 VoxelJobMessage::PaletteSlice { generation, index, colors } => {
-                    if generation != self.voxel_generation || self.cancel_requested {
+                    if self.grid_generations.get(index).copied() != Some(generation) {
+                        continue;
+                    }
+                    if self.grid_cancel_requested.get(index).copied().unwrap_or(false) {
                         continue;
                     }
                     if index < self.palette_slices.len() {
@@ -587,13 +520,15 @@ impl VoxelManager {
                         dirty = true;
                     }
                 }
-                VoxelJobMessage::Cancelled { generation } => {
-                    if generation != self.voxel_generation {
+                VoxelJobMessage::Cancelled { generation, index } => {
+                    if self.grid_generations.get(index).copied() != Some(generation) {
                         continue;
                     }
-                    if self.cancel_requested {
-                        self.voxel_pending.fill(false);
-                        dirty = true;
+                    if index < self.voxel_pending.len() {
+                        self.voxel_pending[index] = false;
+                    }
+                    if let Some(flag) = self.grid_cancel_requested.get_mut(index) {
+                        *flag = false;
                     }
                 }
             }
@@ -614,6 +549,247 @@ impl VoxelManager {
             self.grid_user_transforms.extend((0..needed).map(|_| identity_mat4()));
             self.grid_rotation_speeds.extend(std::iter::repeat(0.0).take(needed));
             self.grid_rotation_angles.extend(std::iter::repeat(0.0).take(needed));
+        }
+    }
+
+    fn ensure_job_state_capacity(&mut self) {
+        let len = self.models.len();
+        if self.grid_generations.len() < len {
+            self.grid_generations.resize(len, 0);
+        }
+        if self.grid_cancel_tokens.len() < len {
+            let missing = len - self.grid_cancel_tokens.len();
+            self.grid_cancel_tokens.extend((0..missing).map(|_| Arc::new(AtomicBool::new(false))));
+        }
+        if self.grid_cancel_requested.len() < len {
+            self.grid_cancel_requested.resize(len, false);
+        }
+    }
+
+    fn prepare_indices_for_regeneration(&mut self, indices: &[usize]) {
+        self.ensure_transform_capacity();
+        self.ensure_job_state_capacity();
+        for &idx in indices {
+            if idx >= self.models.len() {
+                continue;
+            }
+            if idx < self.voxel_views.len() {
+                self.voxel_views[idx] = None;
+            }
+            if idx < self.color_index_views.len() {
+                self.color_index_views[idx] = None;
+            }
+            if idx < self.tile_mask_views.len() {
+                self.tile_mask_views[idx] = None;
+            }
+            if idx < self.tile_payloads.len() {
+                self.tile_payloads[idx] = None;
+            }
+            if idx < self.tile_stats.len() {
+                self.tile_stats[idx] = None;
+            }
+            if idx < self.palette_slices.len() {
+                self.palette_slices[idx] = None;
+            }
+            if idx < self.palette_bases.len() {
+                self.palette_bases[idx] = 0;
+            }
+            if idx < self.palette_lens.len() {
+                self.palette_lens[idx] = 0;
+            }
+            if idx < self.voxel_pending.len() {
+                self.voxel_pending[idx] = true;
+            }
+            if idx < self.voxel_progress.len() {
+                self.voxel_progress[idx] = (0, 0);
+            }
+            let cancel_token = Arc::new(AtomicBool::new(false));
+            if idx < self.grid_cancel_tokens.len() {
+                self.grid_cancel_tokens[idx] = cancel_token;
+            } else {
+                self.grid_cancel_tokens.push(cancel_token);
+            }
+            let generation_id = self.next_generation;
+            self.next_generation = self.next_generation.wrapping_add(1);
+            if idx < self.grid_generations.len() {
+                self.grid_generations[idx] = generation_id;
+            } else {
+                self.grid_generations.resize(idx + 1, 0);
+                self.grid_generations[idx] = generation_id;
+            }
+            if idx < self.grid_cancel_requested.len() {
+                self.grid_cancel_requested[idx] = false;
+            } else {
+                self.grid_cancel_requested.resize(idx + 1, false);
+            }
+        }
+    }
+
+    fn launch_jobs_for_indices(&self, indices: &[usize]) {
+        for &idx in indices {
+            if idx >= self.models.len() {
+                continue;
+            }
+            let txc = self.voxel_result_tx.clone();
+            let path = self.models[idx].path.clone();
+            let generation_id = self.grid_generations.get(idx).copied().unwrap_or(0);
+            let cancel_flag = self
+                .grid_cancel_tokens
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+            let res_for_grid =
+                self.grid_resolutions.get(idx).copied().unwrap_or(self.voxel_resolution);
+            thread::spawn(move || {
+                use crate::voxelize::{VoxelProgressCallbacks, ply_to_voxels_with_progress};
+                let cancelled = cancel_flag.clone();
+                let prog_cb = VoxelProgressCallbacks {
+                    cancelled: &cancelled,
+                    progress: Some(Box::new({
+                        let txp = txc.clone();
+                        move |done, total| {
+                            let _ = txp.send(VoxelJobMessage::Progress {
+                                generation: generation_id,
+                                index: idx,
+                                done,
+                                total,
+                            });
+                        }
+                    })),
+                };
+                if path.extension().and_then(|e| e.to_str()) == Some("vox") {
+                    let palette_span: u8 = u8::MAX;
+                    if !path.exists() {
+                        eprintln!("[voxel] .vox file missing: {}", path.display());
+                        let _ = txc.send(VoxelJobMessage::Cancelled {
+                            generation: generation_id,
+                            index: idx,
+                        });
+                        return;
+                    }
+                    if let Some(result) =
+                        crate::voxelize_vox::vox_to_voxels(&path, None, palette_span)
+                    {
+                        let vox = result.voxels;
+                        let colors = result.colors;
+                        let palette_slice = result.palette;
+                        if vox.iter().all(|&u| u == 0) {
+                            eprintln!(
+                                "[voxel] WARNING: .vox produced empty voxel set: {}",
+                                path.display()
+                            );
+                        }
+                        if cancelled.load(Ordering::Relaxed) {
+                            let _ = txc.send(VoxelJobMessage::Cancelled {
+                                generation: generation_id,
+                                index: idx,
+                            });
+                            return;
+                        }
+                        let compression =
+                            if result.dim_x == 0 || result.dim_y == 0 || result.dim_z == 0 {
+                                crate::tile_compression::TileCompressionResult::default()
+                            } else {
+                                crate::tile_compression::classify_tiles(
+                                    &vox,
+                                    (result.dim_x, result.dim_y, result.dim_z),
+                                    (result.storage_w, result.storage_h, result.storage_d),
+                                )
+                            };
+                        let tile_mask = compression.mask_entries;
+                        let tile_payloads: Vec<[u32; 4]> =
+                            compression.payloads.into_iter().map(|p| p.occupancy).collect();
+                        let tile_stats = compression.stats;
+                        let _ = txc.send(VoxelJobMessage::Finished {
+                            generation: generation_id,
+                            index: idx,
+                            colors,
+                            resolution: result.used_resolution,
+                            dim_x: result.dim_x,
+                            dim_y: result.dim_y,
+                            dim_z: result.dim_z,
+                            storage_w: result.storage_w,
+                            storage_h: result.storage_h,
+                            storage_d: result.storage_d,
+                            tile_mask,
+                            tile_payloads,
+                            tile_stats,
+                        });
+                        if !palette_slice.is_empty() {
+                            let _ = txc.send(VoxelJobMessage::PaletteSlice {
+                                generation: generation_id,
+                                index: idx,
+                                colors: palette_slice,
+                            });
+                        }
+                    } else {
+                        eprintln!("[voxel] Failed to parse .vox file: {}", path.display());
+                        let _ = txc.send(VoxelJobMessage::Cancelled {
+                            generation: generation_id,
+                            index: idx,
+                        });
+                    }
+                    return;
+                }
+
+                if let Some((vox, _colors, logical, storage)) =
+                    ply_to_voxels_with_progress(&path, res_for_grid, prog_cb)
+                {
+                    if cancelled.load(Ordering::Relaxed) {
+                        let _ = txc.send(VoxelJobMessage::Cancelled {
+                            generation: generation_id,
+                            index: idx,
+                        });
+                        return;
+                    }
+                    let (dim_x, dim_y, dim_z) = logical;
+                    let color_count = dim_x as usize * dim_y as usize * dim_z as usize;
+                    let colors = vec![0u8; color_count];
+                    let mut rng = seeded_rng_for_path(&path);
+                    let palette_slice = vec![[
+                        rng.gen_range(0.0..1.0),
+                        rng.gen_range(0.0..1.0),
+                        rng.gen_range(0.0..1.0),
+                        1.0,
+                    ]];
+                    let compression = if dim_x == 0 || dim_y == 0 || dim_z == 0 {
+                        crate::tile_compression::TileCompressionResult::default()
+                    } else {
+                        crate::tile_compression::classify_tiles(
+                            &vox,
+                            (dim_x, dim_y, dim_z),
+                            storage,
+                        )
+                    };
+                    let tile_mask = compression.mask_entries;
+                    let tile_payloads: Vec<[u32; 4]> =
+                        compression.payloads.into_iter().map(|p| p.occupancy).collect();
+                    let tile_stats = compression.stats;
+                    let _ = txc.send(VoxelJobMessage::Finished {
+                        generation: generation_id,
+                        index: idx,
+                        colors,
+                        resolution: res_for_grid,
+                        dim_x,
+                        dim_y,
+                        dim_z,
+                        storage_w: storage.0,
+                        storage_h: storage.1,
+                        storage_d: storage.2,
+                        tile_mask,
+                        tile_payloads,
+                        tile_stats,
+                    });
+                    let _ = txc.send(VoxelJobMessage::PaletteSlice {
+                        generation: generation_id,
+                        index: idx,
+                        colors: palette_slice,
+                    });
+                } else {
+                    let _ = txc
+                        .send(VoxelJobMessage::Cancelled { generation: generation_id, index: idx });
+                }
+            });
         }
     }
 
@@ -707,6 +883,32 @@ impl VoxelManager {
 
         if ready.is_empty() {
             self.active_voxel_grids = 0;
+            let gi = [GridInfo {
+                resolution: self.voxel_resolution,
+                dim_x: self.voxel_resolution,
+                dim_y: self.voxel_resolution,
+                dim_z: self.voxel_resolution,
+                storage_w: self.voxel_resolution / 4,
+                storage_h: self.voxel_resolution / 4,
+                storage_d: self.voxel_resolution / 8,
+                palette_base: 0,
+                palette_len: 0,
+                grid_to_world: translation_to_mat4([0.0, 0.0, 0.0]),
+                ..GridInfo::default()
+            }];
+            let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
+            self.tile_payload_buffer =
+                create_tile_payload_buffer(memory_allocator.clone(), &[TilePayloadGpu::default()]);
+            self.voxel_set = build_voxel_descriptor_set(
+                descriptor_set_allocator,
+                render_pipeline,
+                std::slice::from_ref(&self.placeholder_view),
+                std::slice::from_ref(&self.placeholder_color_view),
+                std::slice::from_ref(&self.placeholder_tile_mask_view),
+                self.palette_buffer.clone(),
+                self.tile_payload_buffer.clone(),
+                grid_info_buffer,
+            );
             return;
         }
 
@@ -890,8 +1092,24 @@ impl VoxelManager {
     }
 
     pub fn cancel(&mut self) {
-        self.cancel_requested = true;
-        self.voxel_cancel_flag.store(true, Ordering::Relaxed);
+        for flag in &self.grid_cancel_tokens {
+            flag.store(true, Ordering::Relaxed);
+        }
+        for requested in &mut self.grid_cancel_requested {
+            *requested = true;
+        }
+    }
+
+    pub fn cancel_grid(&mut self, index: usize) {
+        if index >= self.grid_cancel_tokens.len() {
+            return;
+        }
+        if let Some(flag) = self.grid_cancel_tokens.get(index) {
+            flag.store(true, Ordering::Relaxed);
+        }
+        if let Some(requested) = self.grid_cancel_requested.get_mut(index) {
+            *requested = true;
+        }
     }
 
     pub fn regenerate(
@@ -900,10 +1118,9 @@ impl VoxelManager {
         command_buffer_allocator: Arc<StandardCommandBufferAllocator>, queue: Arc<Queue>,
         render_pipeline: &HotReloadComputePipeline, placeholder_resolution: u32,
     ) {
-        // apply future resolutions
+        self.cancel();
         for (i, r) in self.future_grid_resolutions.clone().into_iter().enumerate() {
             if i < self.grid_resolutions.len() {
-                // Do not override native .vox model resolutions; they come from the file.
                 let is_vox =
                     self.models.get(i).map(|m| m.extension.as_str() == "vox").unwrap_or(false);
                 if !is_vox {
@@ -922,11 +1139,42 @@ impl VoxelManager {
                 placeholder_resolution,
             );
         }
-        self.start_background_voxelization(
-            descriptor_set_allocator,
+        let indices: Vec<usize> = (0..self.models.len()).collect();
+        self.prepare_indices_for_regeneration(&indices);
+        if !indices.is_empty() {
+            self.rebuild_descriptor_set(
+                descriptor_set_allocator.clone(),
+                render_pipeline,
+                memory_allocator.clone(),
+            );
+            self.launch_jobs_for_indices(&indices);
+        }
+    }
+
+    pub fn regenerate_grid(
+        &mut self, index: usize, descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+        memory_allocator: Arc<StandardMemoryAllocator>, render_pipeline: &HotReloadComputePipeline,
+    ) {
+        if index >= self.models.len() {
+            return;
+        }
+        self.cancel_grid(index);
+        if let Some(future) = self.future_grid_resolutions.get(index).copied() {
+            let is_vox = self.models[index].extension.as_str() == "vox";
+            if !is_vox {
+                self.grid_resolutions[index] = future.div_ceil(8) * 8;
+            }
+        }
+        if let Some(maxr) = self.grid_resolutions.iter().copied().max() {
+            self.voxel_resolution = maxr;
+        }
+        self.prepare_indices_for_regeneration(&[index]);
+        self.rebuild_descriptor_set(
+            descriptor_set_allocator.clone(),
             render_pipeline,
             memory_allocator.clone(),
         );
+        self.launch_jobs_for_indices(&[index]);
     }
 
     pub fn add_models(
@@ -966,6 +1214,9 @@ impl VoxelManager {
             self.palette_slices.push(None);
             self.palette_bases.push(0);
             self.palette_lens.push(0);
+            self.grid_generations.push(0);
+            self.grid_cancel_tokens.push(Arc::new(AtomicBool::new(false)));
+            self.grid_cancel_requested.push(false);
         }
         self.regenerate(
             descriptor_set_allocator,
@@ -1005,6 +1256,9 @@ impl VoxelManager {
         self.palette_slices.clear();
         self.palette_bases.clear();
         self.palette_lens.clear();
+        self.grid_generations.clear();
+        self.grid_cancel_tokens.clear();
+        self.grid_cancel_requested.clear();
         self.active_voxel_grids = 1;
 
         if models.is_empty() {
@@ -1029,211 +1283,5 @@ impl VoxelManager {
             render_pipeline,
             placeholder_resolution,
         );
-    }
-
-    fn start_background_voxelization(
-        &mut self, descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-        render_pipeline: &HotReloadComputePipeline, memory_allocator: Arc<StandardMemoryAllocator>,
-    ) {
-        for v in &mut self.voxel_views {
-            *v = None;
-        }
-        for c in &mut self.color_index_views {
-            *c = None;
-        }
-        self.active_voxel_grids = 0;
-        self.voxel_generation = self.voxel_generation.wrapping_add(1);
-        self.voxel_pending.fill(true);
-        self.cancel_requested = false;
-        self.voxel_cancel_flag.store(false, Ordering::Relaxed);
-        for p in &mut self.voxel_progress {
-            *p = (0, 0);
-        }
-        for ps in &mut self.palette_slices {
-            *ps = None;
-        }
-        for tm in &mut self.tile_mask_views {
-            *tm = None;
-        }
-        for tp in &mut self.tile_payloads {
-            *tp = None;
-        }
-        for ts in &mut self.tile_stats {
-            *ts = None;
-        }
-        self.palette_bases.fill(0);
-        self.palette_lens.fill(0);
-        let gi = [GridInfo {
-            resolution: self.voxel_resolution,
-            dim_x: self.voxel_resolution,
-            dim_y: self.voxel_resolution,
-            dim_z: self.voxel_resolution,
-            storage_w: self.voxel_resolution / 4,
-            storage_h: self.voxel_resolution / 4,
-            storage_d: self.voxel_resolution / 8,
-            palette_base: 0,
-            palette_len: 0,
-            grid_to_world: translation_to_mat4([0.0, 0.0, 0.0]),
-            ..GridInfo::default()
-        }];
-        let grid_info_buffer = create_grid_info_buffer(memory_allocator.clone(), &gi);
-        self.tile_payload_buffer =
-            create_tile_payload_buffer(memory_allocator.clone(), &[TilePayloadGpu::default()]);
-        self.voxel_set = build_voxel_descriptor_set(
-            descriptor_set_allocator.clone(),
-            render_pipeline,
-            std::slice::from_ref(&self.placeholder_view),
-            std::slice::from_ref(&self.placeholder_color_view),
-            std::slice::from_ref(&self.placeholder_tile_mask_view),
-            self.palette_buffer.clone(),
-            self.tile_payload_buffer.clone(),
-            grid_info_buffer,
-        );
-        let (tx, rx) = mpsc::channel();
-        self.voxel_result_rx = rx;
-        let generation_id = self.voxel_generation;
-        let cancel_flag = self.voxel_cancel_flag.clone();
-        for (idx, model) in self.models.iter().enumerate() {
-            let txc = tx.clone();
-            let path = model.path.clone();
-            let gen_thread = generation_id;
-            let cancel_local = cancel_flag.clone();
-            let res_for_grid = self.grid_resolutions[idx];
-            thread::spawn(move || {
-                use crate::voxelize::{VoxelProgressCallbacks, ply_to_voxels_with_progress};
-                let cancelled = cancel_local.clone();
-                // Base palette index legacy removed; indices are local until compaction.
-                let prog_cb = VoxelProgressCallbacks {
-                    cancelled: &cancelled,
-                    progress: Some(Box::new({
-                        let txp = txc.clone();
-                        move |done, total| {
-                            let _ = txp.send(VoxelJobMessage::Progress {
-                                generation: gen_thread,
-                                index: idx,
-                                done,
-                                total,
-                            });
-                        }
-                    })),
-                };
-                if path.extension().and_then(|e| e.to_str()) == Some("vox") {
-                    // No progress callbacks for .vox yet (fast load typically); still send palette slice.
-                    let palette_span: u8 = u8::MAX;
-                    if !path.exists() {
-                        eprintln!("[voxel] .vox file missing: {}", path.display());
-                        let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
-                    } else if let Some(result) =
-                        crate::voxelize_vox::vox_to_voxels(&path, None, palette_span)
-                    {
-                        let vox = result.voxels;
-                        let colors = result.colors;
-                        let palette_slice = result.palette;
-                        if vox.iter().all(|&u| u == 0) {
-                            eprintln!(
-                                "[voxel] WARNING: .vox produced empty voxel set: {}",
-                                path.display()
-                            );
-                        }
-                        if !cancelled.load(Ordering::Relaxed) {
-                            let compression =
-                                if result.dim_x == 0 || result.dim_y == 0 || result.dim_z == 0 {
-                                    crate::tile_compression::TileCompressionResult::default()
-                                } else {
-                                    crate::tile_compression::classify_tiles(
-                                        &vox,
-                                        (result.dim_x, result.dim_y, result.dim_z),
-                                        (result.storage_w, result.storage_h, result.storage_d),
-                                    )
-                                };
-                            let tile_mask = compression.mask_entries;
-                            let tile_payloads: Vec<[u32; 4]> =
-                                compression.payloads.into_iter().map(|p| p.occupancy).collect();
-                            let tile_stats = compression.stats;
-                            let _ = txc.send(VoxelJobMessage::Finished {
-                                generation: gen_thread,
-                                index: idx,
-                                colors,
-                                resolution: result.used_resolution,
-                                dim_x: result.dim_x,
-                                dim_y: result.dim_y,
-                                dim_z: result.dim_z,
-                                storage_w: result.storage_w,
-                                storage_h: result.storage_h,
-                                storage_d: result.storage_d,
-                                tile_mask,
-                                tile_payloads,
-                                tile_stats,
-                            });
-                            if !palette_slice.is_empty() {
-                                let _ = txc.send(VoxelJobMessage::PaletteSlice {
-                                    generation: gen_thread,
-                                    index: idx,
-                                    colors: palette_slice,
-                                });
-                            }
-                        }
-                    } else {
-                        eprintln!("[voxel] Failed to parse .vox file: {}", path.display());
-                        let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
-                    }
-                } else {
-                    if let Some((vox, _colors, logical, storage)) =
-                        ply_to_voxels_with_progress(&path, res_for_grid, prog_cb)
-                    {
-                        let (dim_x, dim_y, dim_z) = logical;
-                        let color_count = dim_x as usize * dim_y as usize * dim_z as usize;
-                        let colors = vec![0u8; color_count];
-                        let mut rng = seeded_rng_for_path(&path);
-                        let palette_slice = vec![[
-                            rng.gen_range(0.0..1.0),
-                            rng.gen_range(0.0..1.0),
-                            rng.gen_range(0.0..1.0),
-                            1.0,
-                        ]];
-                        if !cancelled.load(Ordering::Relaxed) {
-                            let compression = if dim_x == 0 || dim_y == 0 || dim_z == 0 {
-                                crate::tile_compression::TileCompressionResult::default()
-                            } else {
-                                crate::tile_compression::classify_tiles(
-                                    &vox,
-                                    (dim_x, dim_y, dim_z),
-                                    storage,
-                                )
-                            };
-                            let tile_mask = compression.mask_entries;
-                            let tile_payloads: Vec<[u32; 4]> =
-                                compression.payloads.into_iter().map(|p| p.occupancy).collect();
-                            let tile_stats = compression.stats;
-                            let _ = txc.send(VoxelJobMessage::Finished {
-                                generation: gen_thread,
-                                index: idx,
-                                colors,
-                                resolution: res_for_grid,
-                                dim_x: dim_x,
-                                dim_y: dim_y,
-                                dim_z: dim_z,
-                                storage_w: storage.0,
-                                storage_h: storage.1,
-                                storage_d: storage.2,
-                                tile_mask,
-                                tile_payloads,
-                                tile_stats,
-                            });
-                            let _ = txc.send(VoxelJobMessage::PaletteSlice {
-                                generation: gen_thread,
-                                index: idx,
-                                colors: palette_slice,
-                            });
-                        } else {
-                            let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
-                        }
-                    } else {
-                        let _ = txc.send(VoxelJobMessage::Cancelled { generation: gen_thread });
-                    }
-                }
-            });
-        }
-        drop(tx);
     }
 }

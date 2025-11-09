@@ -25,7 +25,9 @@ impl App {
         // Safe unwrap: render() only calls this after rcx creation in resumed()
         let mut trigger_benchmark = false;
         // Defer actions requiring &mut self after UI closure to avoid borrow conflicts.
-        let mut request_regen_voxels = false;
+        let request_regen_voxels = false;
+        let mut per_grid_regen_indices: Vec<usize> = Vec::new();
+        let mut per_grid_cancel_indices: Vec<usize> = Vec::new();
 
         let mut rebuild_render_targets = false;
         let mut mark_state_dirty = false;
@@ -406,6 +408,21 @@ impl App {
                                     .copied()
                                     .unwrap_or(true);
 
+                                ui.horizontal(|ui| {
+                                    if ui.button("Regenerate Grid").clicked() {
+                                        per_grid_regen_indices.push(i);
+                                        mark_state_dirty = true;
+                                    }
+                                    let cancel_enabled = pending;
+                                    if ui
+                                        .add_enabled(cancel_enabled, egui::Button::new("Cancel Voxelization"))
+                                        .clicked()
+                                    {
+                                        per_grid_cancel_indices.push(i);
+                                        mark_state_dirty = true;
+                                    }
+                                });
+
                                 if pending {
                                     if total_tris > 0 {
                                         let pct =
@@ -489,14 +506,6 @@ impl App {
                     }
 
                     ui.separator();
-                    if ui.button("Regenerate Grids").clicked() {
-                        request_regen_voxels = true;
-                    }
-                    if ui.button("Cancel Voxelization").clicked() {
-                        self.voxel.manager.cancel();
-                    }
-
-                    ui.separator();
                     let total = self.voxel.manager.voxel_pending.len();
                     let remaining = self.voxel.manager.voxel_pending.iter().filter(|b| **b).count();
                     ui.label(format!(
@@ -509,6 +518,21 @@ impl App {
                 mark_state_dirty = true;
             }
         });
+        }
+
+        if !per_grid_cancel_indices.is_empty() {
+            per_grid_cancel_indices.sort_unstable();
+            per_grid_cancel_indices.dedup();
+            for idx in per_grid_cancel_indices.iter().copied() {
+                self.voxel.cancel_grid(idx);
+            }
+        }
+        if !per_grid_regen_indices.is_empty() {
+            per_grid_regen_indices.sort_unstable();
+            per_grid_regen_indices.dedup();
+            for idx in per_grid_regen_indices.iter().copied() {
+                self.voxel.regenerate_grid(idx, &self.pipelines.render);
+            }
         }
 
         if reset_to_defaults_models {

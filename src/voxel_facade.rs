@@ -70,6 +70,19 @@ impl VoxelSystem {
         );
     }
 
+    pub fn regenerate_grid(&mut self, index: usize, render_pipeline: &HotReloadComputePipeline) {
+        self.manager.regenerate_grid(
+            index,
+            self.descriptor_set_allocator.clone(),
+            self.memory_allocator.clone(),
+            render_pipeline,
+        );
+    }
+
+    pub fn cancel_grid(&mut self, index: usize) {
+        self.manager.cancel_grid(index);
+    }
+
     pub fn add_models(
         &mut self, models: Vec<DiscoveredModel>, render_pipeline: &HotReloadComputePipeline,
         placeholder_resolution: u32,
