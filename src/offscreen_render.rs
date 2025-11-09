@@ -257,19 +257,70 @@ mod tests {
     use super::*;
     use std::sync::OnceLock;
 
-    static SNAPSHOT: OnceLock<RenderSnapshot> = OnceLock::new();
+    static FULL_SNAPSHOT: OnceLock<RenderSnapshot> = OnceLock::new();
 
-    fn cached_snapshot() -> &'static RenderSnapshot {
-        SNAPSHOT.get_or_init(|| {
-            render_offscreen_snapshot(256, 256, RenderMode::Shade, RenderSnapshotOptions::default())
+    fn full_snapshot() -> &'static RenderSnapshot {
+        FULL_SNAPSHOT.get_or_init(|| {
+            render_offscreen_snapshot(256, 256, RenderMode::Shade,
+                RenderSnapshotOptions::default()
+            )
         })
+    }
+
+    static EMPTY_SNAPSHOT: OnceLock<RenderSnapshot> = OnceLock::new();
+
+    fn empty_snapshot() -> &'static RenderSnapshot {
+        EMPTY_SNAPSHOT.get_or_init(|| {
+            render_offscreen_snapshot(256, 256, RenderMode::Shade,
+                RenderSnapshotOptions {
+                    model_selection: SnapshotModelSelection::Named(&[])
+                },
+            )
+        })
+    }
+
+    fn out_dir() -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/reference");
+        std::fs::create_dir_all(&dir).expect("failed to create reference directory");
+        return dir
+    }
+
+    #[test]
+    fn offscreen_render_matches_empty_reference() {
+        let snapshot = empty_snapshot();
+        let out_dir = out_dir();
+        let baseline_path = out_dir.join("empty_reference.png");
+        let update_baseline = std::env::var("VOXEL_RENDER_UPDATE").is_ok();
+
+        if update_baseline || !baseline_path.exists() {
+            snapshot.save_png(&baseline_path).expect("failed to write baseline image");
+            if !update_baseline {
+                panic!(
+                    "Reference image missing; saved snapshot to {}. Rerun with VOXEL_RENDER_UPDATE=1 on a known-good branch to populate the baseline.",
+                    baseline_path.display()
+                );
+            }
+        }
+
+        let expected = image::open(&baseline_path)
+            .expect("failed to load baseline image")
+            .to_rgba8()
+            .into_raw();
+
+        if snapshot.pixels != expected {
+            let actual_path = out_dir.join("empty_reference.actual.png");
+            snapshot.save_png(&actual_path).expect("failed to write actual render output");
+            panic!(
+                "Rendered snapshot diverged. Examine {} and rerun with VOXEL_RENDER_UPDATE=1 if the change is expected.",
+                actual_path.display()
+            );
+        }
     }
 
     #[test]
     fn offscreen_render_matches_reference() {
-        let snapshot = cached_snapshot();
-        let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/reference");
-        std::fs::create_dir_all(&out_dir).expect("failed to create reference directory");
+        let snapshot = full_snapshot();
+        let out_dir = out_dir();
         let baseline_path = out_dir.join("shade_reference.png");
         let update_baseline = std::env::var("VOXEL_RENDER_UPDATE").is_ok();
 
@@ -301,7 +352,7 @@ mod tests {
     #[test]
     fn verify_no_transparent() {
         // 220, 100, 30x30
-        let snapshot = cached_snapshot();
+        let snapshot = full_snapshot();
         let mut num_transparent = 0;
         for y in 140..=170 {
             for x in 220..=250 {
@@ -322,7 +373,7 @@ mod tests {
             "Found {} transparent pixels in the test area",
             num_transparent
         );
-        //let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/reference");
+        //let out_dir = out_dir();
         //let actual_path = out_dir.join("no_transparent.actual.png");
         //snapshot.save_png(&actual_path).expect("failed to write actual render output");
     }
@@ -331,7 +382,7 @@ mod tests {
     #[test]
     fn verify_all_green() {
         // 84, 105, 11x6
-        let snapshot = cached_snapshot();
+        let snapshot = full_snapshot();
         let mut num_not_green = 0;
         for y in 105..=111 {
             for x in 84..=95 {
@@ -345,7 +396,7 @@ mod tests {
             }
         }
         assert_eq!(num_not_green, 0, "Found {} non-green pixels in the test area", num_not_green);
-        //let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/reference");
+        //let out_dir = out_dir();
         //let actual_path = out_dir.join("all_green.actual.png");
         //snapshot.save_png(&actual_path).expect("failed to write actual render output");
     }
