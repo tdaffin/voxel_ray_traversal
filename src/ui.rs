@@ -1,6 +1,6 @@
 use egui_winit_vulkano::egui::{self, Color32};
 
-use crate::{app::App, render_mode::RenderMode, rendering::get_images_and_sets};
+use crate::{app::App, render_mode::RenderMode};
 
 /// Return values from a UI frame
 /// (request_regen_voxels, trigger_benchmark)
@@ -23,52 +23,81 @@ impl App {
         // Capture read-only stats before mutable borrows to avoid borrow conflicts
         let current_fps = self.fps();
         // Safe unwrap: render() only calls this after rcx creation in resumed()
-        let rcx_for_ui = self.rcx.as_mut().unwrap();
         let mut trigger_benchmark = false;
         // Defer actions requiring &mut self after UI closure to avoid borrow conflicts.
         let mut request_regen_voxels = false;
 
-        rcx_for_ui.gui.immediate_ui(|gui| {
+        let mut rebuild_render_targets = false;
+        let mut mark_state_dirty = false;
+        {
+            let rcx_for_ui = self.rcx.as_mut().unwrap();
+            rcx_for_ui.gui.immediate_ui(|gui| {
             let ctx = gui.context();
 
             let translucent_fill = egui::Color32::from_rgba_unmultiplied(30, 30, 40, 120); // semi-transparent
             egui::Window::new("Settings")
                 .frame(egui::Frame::window(&ctx.style()).fill(translucent_fill))
                 .show(&ctx, |ui| {
+                    let mut ui_state_changed = false;
                     ui.style_mut().spacing.slider_width = 250.0;
                     ui.horizontal(|ui| {
+                        let mut mode_changed = false;
                         for &mode in RenderMode::ALL {
-                            ui.selectable_value(&mut self.render_mode, mode, format!("{:?}", mode));
+                            let response =
+                                ui.selectable_value(&mut self.render_mode, mode, format!("{:?}", mode));
+                            if response.changed() {
+                                mode_changed = true;
+                            }
+                        }
+                        if mode_changed {
+                            ui_state_changed = true;
                         }
                     });
-                    ui.checkbox(&mut self.always_instant, "Full grids")
+                    if ui
+                        .checkbox(&mut self.always_instant, "Full grids")
                         .on_hover_text(
                             "When enabled, grids register as a hit immediately upon entry.\nDisable to require sampling a filled bit first."
-                        );
-                    ui.checkbox(&mut self.hit_back, "Hit grid backs")
+                        )
+                        .changed()
+                    {
+                        ui_state_changed = true;
+                    }
+                    if ui
+                        .checkbox(&mut self.hit_back, "Hit grid backs")
                         .on_hover_text(
                             "When enabled, rays register a hit when they exit a grid without finding a filled voxel."
-                        );
+                        )
+                        .changed()
+                    {
+                        ui_state_changed = true;
+                    }
                     if ui
                         .checkbox(&mut self.verbose_logging, "Verbose logging")
                         .on_hover_text("Print detailed palette and compression stats to stdout")
                         .changed()
                     {
                         crate::log_config::set_verbose_logging(self.verbose_logging);
+                        ui_state_changed = true;
                     }
                     ui.separator();
                     let max_grids = (self.voxel.manager.models.len() + 1).max(1) as u32;
-                    ui.add(
-                        egui::Slider::new(
-                            &mut self.voxel.manager.active_voxel_grids,
-                            1..=max_grids,
-                        )
-                        .text("Active Grids (incl. ground)"),
-                    );
+                    let active_slider = egui::Slider::new(
+                        &mut self.voxel.manager.active_voxel_grids,
+                        1..=max_grids,
+                    )
+                    .text("Active Grids (incl. ground)");
+                    if ui.add(active_slider).changed() {
+                        ui_state_changed = true;
+                    }
                     if ui.button("Benchmark Traversal Variants").clicked() {
                         trigger_benchmark = true;
                     }
-                    ui.add(egui::Slider::new(&mut self.camera.fov, 0.0..=180.0).text("FOV"));
+                    if ui
+                        .add(egui::Slider::new(&mut self.camera.fov, 0.0..=180.0).text("FOV"))
+                        .changed()
+                    {
+                        ui_state_changed = true;
+                    }
                     let mut mouse_sense = self.camera.mouse_sensitivity as f32;
                     if ui
                         .add(
@@ -78,62 +107,42 @@ impl App {
                         .changed()
                     {
                         self.camera.mouse_sensitivity = mouse_sense as f64;
+                        ui_state_changed = true;
                     }
                     ui.separator();
                     ui.label("Light Direction (spherical):");
-                    static mut THETA: f32 = 0.9; // elevation
-                    static mut PHI: f32 = 0.6; // azimuth
-                    // Safe because single-threaded UI pass
-                    let mut theta;
-                    let mut phi;
-                    unsafe {
-                        theta = THETA;
-                        phi = PHI;
-                    }
+                    let mut theta = self.light_theta;
+                    let mut phi = self.light_phi;
                     if ui
                         .add(egui::Slider::new(&mut theta, -1.57..=1.57).text("Elevation"))
                         .changed()
                     {
-                        unsafe {
-                            THETA = theta;
-                        }
+                        self.light_theta = theta;
+                        let theta_val = self.light_theta;
+                        let phi_val = self.light_phi;
+                        let ct = theta_val.cos();
+                        self.light_dir = [ct * phi_val.cos(), theta_val.sin(), ct * phi_val.sin()];
+                        ui_state_changed = true;
                     }
                     if ui
                         .add(egui::Slider::new(&mut phi, -3.1415..=3.1415).text("Azimuth"))
                         .changed()
                     {
-                        unsafe {
-                            PHI = phi;
-                        }
+                        self.light_phi = phi;
+                        let theta_val = self.light_theta;
+                        let phi_val = self.light_phi;
+                        let ct = theta_val.cos();
+                        self.light_dir = [ct * phi_val.cos(), theta_val.sin(), ct * phi_val.sin()];
+                        ui_state_changed = true;
                     }
-                    let ct = theta.cos();
-                    self.light_dir = [ct * phi.cos(), theta.sin(), ct * phi.sin()];
                     // Render scale slider -> may recreate render & resample images
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut self.render_scale, 0.125..=8.0)
-                                .text("Render Scale"),
-                        )
-                        .changed()
-                    {
-                        let window_extent: [u32; 2] = rcx_for_ui.window.inner_size().into();
-                        let render_extent = [
-                            (window_extent[0] as f32 * self.render_scale) as u32,
-                            (window_extent[1] as f32 * self.render_scale) as u32,
-                        ];
-                        (
-                            rcx_for_ui.render_image,
-                            rcx_for_ui.render_set,
-                            rcx_for_ui.resample_image,
-                            rcx_for_ui.resample_set,
-                        ) = get_images_and_sets(
-                            self.gpu.memory_allocator.clone(),
-                            self.gpu.descriptor_set_allocator.clone(),
-                            &self.pipelines.render,
-                            &self.pipelines.resample,
-                            render_extent,
-                            window_extent,
-                        );
+                    let render_scale_response = ui.add(
+                        egui::Slider::new(&mut self.render_scale, 0.125..=8.0)
+                            .text("Render Scale"),
+                    );
+                    if render_scale_response.changed() {
+                        rebuild_render_targets = true;
+                        ui_state_changed = true;
                     }
 
                     ui.separator();
@@ -143,6 +152,42 @@ impl App {
                         .clicked()
                     {
                         self.advanced_window_open = true;
+                        ui_state_changed = true;
+                    }
+
+                    if ui.button("Reset UI to Defaults").clicked() {
+                        let defaults = crate::ui_state::PersistedUiState::default();
+                        let previous_scale = self.render_scale;
+                        self.render_mode = defaults.render_mode;
+                        self.always_instant = defaults.always_instant;
+                        self.hit_back = defaults.hit_back;
+                        self.verbose_logging = defaults.verbose_logging;
+                        crate::log_config::set_verbose_logging(self.verbose_logging);
+                        self.render_scale = defaults.render_scale;
+                        let max_grids = (self.voxel.manager.models.len() + 1).max(1) as u32;
+                        self.voxel.manager.active_voxel_grids =
+                            defaults.active_voxel_grids.clamp(1, max_grids);
+                        self.camera.fov = defaults.camera_fov;
+                        self.camera.mouse_sensitivity = defaults.mouse_sensitivity;
+                        self.light_theta = defaults.light_theta;
+                        self.light_phi = defaults.light_phi;
+                        let theta_val = self.light_theta;
+                        let phi_val = self.light_phi;
+                        let ct = theta_val.cos();
+                        self.light_dir = [ct * phi_val.cos(), theta_val.sin(), ct * phi_val.sin()];
+                        self.advanced_window_open = defaults.advanced_window_open;
+                        self.future_grid_resolutions =
+                            self.voxel.manager.grid_resolutions.clone();
+                        self.voxel.manager.future_grid_resolutions =
+                            self.future_grid_resolutions.clone();
+                        if (self.render_scale - previous_scale).abs() > f32::EPSILON {
+                            rebuild_render_targets = true;
+                        }
+                        ui_state_changed = true;
+                    }
+
+                    if ui_state_changed {
+                        mark_state_dirty = true;
                     }
                 });
 
@@ -177,6 +222,7 @@ impl App {
                     ));
                 });
 
+            let advanced_open_before = self.advanced_window_open;
             egui::Window::new("Advanced Tools")
                 .open(&mut self.advanced_window_open)
                 .frame(egui::Frame::window(&ctx.style()).fill(translucent_fill))
@@ -205,6 +251,12 @@ impl App {
                         if ui.add(egui::Slider::new(&mut val, 8..=4096).text(label)).changed() {
                             val = val.div_ceil(8) * 8;
                             self.future_grid_resolutions[i] = val;
+                            if let Some(entry) =
+                                self.voxel.manager.future_grid_resolutions.get_mut(i)
+                            {
+                                *entry = val;
+                            }
+                            mark_state_dirty = true;
                         }
                     }
 
@@ -319,7 +371,8 @@ impl App {
                         total - remaining,
                         total
                     ));
-                    for (i, (done, total_tris)) in self.voxel.manager.voxel_progress.iter().enumerate() {
+                    for (i, (done, total_tris)) in self.voxel.manager.voxel_progress.iter().enumerate()
+                    {
                         let (d, t) = (*done, *total_tris);
                         let pct = if t > 0 { (d as f32 / t as f32 * 100.0).min(100.0) } else { 0.0 };
                         let status = if self.voxel.manager.voxel_pending[i] {
@@ -330,7 +383,19 @@ impl App {
                         ui.label(format!("Grid {i}: {status}"));
                     }
                 });
+            if self.advanced_window_open != advanced_open_before {
+                mark_state_dirty = true;
+            }
         });
+        }
+
+        if rebuild_render_targets {
+            self.apply_render_scale_change();
+        }
+        if mark_state_dirty {
+            self.mark_ui_state_dirty();
+        }
+        self.flush_ui_state();
 
         (request_regen_voxels, trigger_benchmark)
     }

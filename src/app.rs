@@ -1,6 +1,6 @@
 use crate::input_controller::InputController;
 use egui_winit_vulkano::{Gui, GuiConfig};
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use vulkano::{
     image::view::{ImageView, ImageViewCreateInfo},
     swapchain::Surface,
@@ -24,6 +24,7 @@ use crate::frame_renderer::record_frame;
 use crate::render_mode::RenderMode;
 use crate::rendering::{RenderContext, get_images_and_sets, get_swapchain_images, load_icon};
 use crate::swapchain_manager::SwapchainManager;
+use crate::ui_state::{PersistedUiState, default_ui_state_path, load_ui_state, save_ui_state};
 use crate::voxel_facade::VoxelSystem;
 
 const INITIAL_WINDOW_RESOLUTION: PhysicalSize<u32> = PhysicalSize::new(960, 960);
@@ -40,6 +41,8 @@ pub struct App {
     pub(crate) render_mode: RenderMode,
     pub(crate) render_scale: f32,
     pub(crate) light_dir: [f32; 3],
+    pub(crate) light_theta: f32,
+    pub(crate) light_phi: f32,
     pub(crate) always_instant: bool,
     pub(crate) hit_back: bool,
     pub(crate) verbose_logging: bool,
@@ -47,6 +50,9 @@ pub struct App {
 
     input: InputController,
     frame_timer: FrameTimer,
+
+    ui_state_dirty: bool,
+    ui_state_path: Option<PathBuf>,
 
     pub(crate) rcx: Option<RenderContext>,
 }
@@ -57,7 +63,8 @@ impl App {
         future_grid_resolutions: Vec<u32>, camera: Camera, render_mode: RenderMode,
         render_scale: f32, input: InputController, frame_timer: FrameTimer, verbose_logging: bool,
     ) -> Self {
-        let app = App {
+        let ui_state_path = default_ui_state_path();
+        let mut app = App {
             gpu,
             pipelines,
             voxel,
@@ -66,14 +73,24 @@ impl App {
             render_mode,
             render_scale,
             light_dir: [0.5, 0.8, 0.3],
+            light_theta: 0.9,
+            light_phi: 0.6,
             always_instant: false,
             hit_back: false,
             verbose_logging,
             advanced_window_open: false,
             input,
             frame_timer,
+            ui_state_dirty: false,
+            ui_state_path: ui_state_path.clone(),
             rcx: None,
         };
+        app.update_light_direction_from_angles();
+        if let Some(path) = ui_state_path {
+            if let Some(saved) = load_ui_state(&path) {
+                app.apply_persisted_state(&saved);
+            }
+        }
         crate::log_config::set_verbose_logging(app.verbose_logging);
         app
     }
@@ -177,6 +194,97 @@ impl App {
             rcx.gui.draw_on_image(render_future, rcx.image_views[image_index as usize].clone());
 
         SwapchainManager::present_and_wait(&self.gpu, rcx, image_index, gui_future);
+    }
+
+    pub(crate) fn update_light_direction_from_angles(&mut self) {
+        let theta = self.light_theta;
+        let phi = self.light_phi;
+        let ct = theta.cos();
+        self.light_dir = [ct * phi.cos(), theta.sin(), ct * phi.sin()];
+    }
+
+    fn apply_persisted_state(&mut self, state: &PersistedUiState) {
+        self.render_mode = state.render_mode;
+        self.always_instant = state.always_instant;
+        self.hit_back = state.hit_back;
+        self.verbose_logging = state.verbose_logging;
+        self.render_scale = state.render_scale.clamp(0.125, 8.0);
+        self.camera.fov = state.camera_fov.clamp(0.0, 180.0);
+        self.camera.mouse_sensitivity = state.mouse_sensitivity.clamp(0.0005_f64, 0.01_f64);
+        self.light_theta = state.light_theta.clamp(-1.57, 1.57);
+        self.light_phi = state.light_phi.clamp(-std::f32::consts::PI, std::f32::consts::PI);
+        self.advanced_window_open = state.advanced_window_open;
+
+        let max_grids = (self.voxel.manager.models.len() + 1).max(1) as u32;
+        self.voxel.manager.active_voxel_grids = state.active_voxel_grids.clamp(1, max_grids);
+
+        self.future_grid_resolutions = self.voxel.manager.grid_resolutions.clone();
+        if !state.future_grid_resolutions.is_empty() {
+            for (dst, src) in
+                self.future_grid_resolutions.iter_mut().zip(state.future_grid_resolutions.iter())
+            {
+                let snapped = ((*src).max(8) + 7) / 8 * 8;
+                *dst = snapped;
+            }
+        }
+        self.voxel.manager.future_grid_resolutions = self.future_grid_resolutions.clone();
+
+        self.update_light_direction_from_angles();
+        self.ui_state_dirty = false;
+    }
+
+    fn current_persisted_state(&self) -> PersistedUiState {
+        PersistedUiState {
+            render_mode: self.render_mode,
+            always_instant: self.always_instant,
+            hit_back: self.hit_back,
+            verbose_logging: self.verbose_logging,
+            render_scale: self.render_scale,
+            active_voxel_grids: self.voxel.manager.active_voxel_grids,
+            camera_fov: self.camera.fov,
+            mouse_sensitivity: self.camera.mouse_sensitivity,
+            light_theta: self.light_theta,
+            light_phi: self.light_phi,
+            advanced_window_open: self.advanced_window_open,
+            future_grid_resolutions: self.future_grid_resolutions.clone(),
+        }
+    }
+
+    pub(crate) fn mark_ui_state_dirty(&mut self) {
+        self.ui_state_dirty = true;
+    }
+
+    pub(crate) fn flush_ui_state(&mut self) {
+        if !self.ui_state_dirty {
+            return;
+        }
+        if let Some(path) = self.ui_state_path.clone() {
+            let state = self.current_persisted_state();
+            if let Err(err) = save_ui_state(&path, &state) {
+                eprintln!("[ui] failed to save ui state: {err}");
+            } else {
+                self.ui_state_dirty = false;
+            }
+        }
+    }
+
+    pub(crate) fn apply_render_scale_change(&mut self) {
+        if let Some(rcx) = self.rcx.as_mut() {
+            let window_extent: [u32; 2] = rcx.window.inner_size().into();
+            let render_extent = [
+                (window_extent[0] as f32 * self.render_scale) as u32,
+                (window_extent[1] as f32 * self.render_scale) as u32,
+            ];
+            (rcx.render_image, rcx.render_set, rcx.resample_image, rcx.resample_set) =
+                get_images_and_sets(
+                    self.gpu.memory_allocator.clone(),
+                    self.gpu.descriptor_set_allocator.clone(),
+                    &self.pipelines.render,
+                    &self.pipelines.resample,
+                    render_extent,
+                    window_extent,
+                );
+        }
     }
 }
 

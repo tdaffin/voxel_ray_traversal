@@ -20,6 +20,7 @@ mod rendering;
 mod swapchain_manager;
 mod tile_compression;
 mod ui;
+mod ui_state;
 mod voxel;
 mod voxel_facade;
 mod voxel_job;
