@@ -134,6 +134,21 @@ pub fn render_offscreen_snapshot(
         gpu.queue.clone(),
     );
 
+    #[cfg(test)]
+    {
+        let model_names: Vec<_> = voxel
+            .manager
+            .models
+            .iter()
+            .map(|m| m.name.clone())
+            .collect();
+        let dims: Vec<_> = voxel.manager.grid_dims.iter().copied().collect();
+        println!("[offscreen] models: {:?}", model_names);
+        println!("[offscreen] dims: {:?}", dims);
+
+        println!("[offscreen] active voxel grids: {}", voxel.manager.active_voxel_grids);
+    }
+
     let mut camera = if let Some(mut cam) = options.camera.clone() {
         cam.extent = [width as f64, height as f64];
         cam
