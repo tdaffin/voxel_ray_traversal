@@ -77,6 +77,7 @@ impl AppBuilder {
             gpu.command_buffer_allocator.clone(),
             gpu.queue.clone(),
             &pipelines.render,
+            None,
         );
         let future_grid_resolutions = voxel.manager.grid_resolutions.clone();
 

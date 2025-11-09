@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::Path,
     sync::Arc,
     thread,
@@ -25,6 +26,7 @@ use crate::{
     camera::Camera,
     gpu::GpuContext,
     hot_reload::HotReloadComputePipeline,
+    model_discovery::{DiscoveredModel, discover_models},
     pipelines::PipelineManager,
     push_constants::{PushConstantsInput, build_push_constants},
     render_mode::RenderMode,
@@ -39,6 +41,29 @@ pub struct RenderSnapshot {
     pub pixels: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum SnapshotModelSelection<'a> {
+    All,
+    Named(&'a [&'a str]),
+}
+
+impl<'a> Default for SnapshotModelSelection<'a> {
+    fn default() -> Self {
+        SnapshotModelSelection::All
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RenderSnapshotOptions<'a> {
+    pub model_selection: SnapshotModelSelection<'a>,
+}
+
+impl<'a> Default for RenderSnapshotOptions<'a> {
+    fn default() -> Self {
+        Self { model_selection: SnapshotModelSelection::All }
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 impl RenderSnapshot {
     pub fn save_png(&self, path: &Path) -> ImageResult<()> {
@@ -50,11 +75,44 @@ impl RenderSnapshot {
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn render_offscreen_snapshot(
-    width: u32, height: u32, render_mode: RenderMode,
+    width: u32, height: u32, render_mode: RenderMode, options: RenderSnapshotOptions<'_>,
 ) -> RenderSnapshot {
     let gpu = GpuContext::headless();
     let shaders_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
     let pipelines = PipelineManager::new(gpu.device.clone(), &shaders_dir);
+
+    let models_override: Option<Vec<DiscoveredModel>> = match options.model_selection {
+        SnapshotModelSelection::All => None,
+        SnapshotModelSelection::Named(names) => {
+            if names.is_empty() {
+                Some(Vec::new())
+            } else {
+                let wanted: HashSet<String> =
+                    names.iter().map(|name| name.to_ascii_lowercase()).collect();
+                let filtered: Vec<DiscoveredModel> = discover_models()
+                    .into_iter()
+                    .filter(|model| {
+                        let stem_lower = model.name.to_ascii_lowercase();
+                        if wanted.contains(&stem_lower) {
+                            return true;
+                        }
+                        model
+                            .path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .map(|s| wanted.contains(&s.to_ascii_lowercase()))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+
+                if filtered.is_empty() {
+                    eprintln!("[offscreen] snapshot model filter matched zero models: {:?}", names);
+                }
+
+                Some(filtered)
+            }
+        }
+    };
 
     let mut voxel = VoxelSystem::new(
         24,
@@ -63,6 +121,7 @@ pub fn render_offscreen_snapshot(
         gpu.command_buffer_allocator.clone(),
         gpu.queue.clone(),
         &pipelines.render,
+        models_override,
     );
 
     wait_for_voxel_jobs(
@@ -196,12 +255,14 @@ fn wait_for_voxel_jobs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{OnceLock};
+    use std::sync::OnceLock;
 
     static SNAPSHOT: OnceLock<RenderSnapshot> = OnceLock::new();
 
     fn cached_snapshot() -> &'static RenderSnapshot {
-        SNAPSHOT.get_or_init(|| render_offscreen_snapshot(256, 256, RenderMode::Shade))
+        SNAPSHOT.get_or_init(|| {
+            render_offscreen_snapshot(256, 256, RenderMode::Shade, RenderSnapshotOptions::default())
+        })
     }
 
     #[test]
@@ -236,7 +297,7 @@ mod tests {
             );
         }
     }
-    
+
     #[test]
     fn verify_no_transparent() {
         // 220, 100, 30x30
@@ -256,7 +317,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(num_transparent, 0, "Found {} transparent pixels in the test area", num_transparent);
+        assert_eq!(
+            num_transparent, 0,
+            "Found {} transparent pixels in the test area",
+            num_transparent
+        );
         //let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/reference");
         //let actual_path = out_dir.join("no_transparent.actual.png");
         //snapshot.save_png(&actual_path).expect("failed to write actual render output");

@@ -197,9 +197,9 @@ impl VoxelManager {
         initial_resolution: u32, memory_allocator: Arc<StandardMemoryAllocator>,
         descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
         command_buffer_allocator: Arc<StandardCommandBufferAllocator>, queue: Arc<Queue>,
-        render_pipeline: &HotReloadComputePipeline,
+        render_pipeline: &HotReloadComputePipeline, models_override: Option<Vec<DiscoveredModel>>,
     ) -> Self {
-        let models = discover_models();
+        let models = models_override.unwrap_or_else(discover_models);
         let model_count = models.len().max(1); // avoid div by zero in palette math
         let voxel_images_enabled = render_pipeline.layout().set_layouts()[1]
             .bindings()

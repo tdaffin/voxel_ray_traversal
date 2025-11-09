@@ -6,7 +6,9 @@ use vulkano::{
     memory::allocator::StandardMemoryAllocator,
 };
 
-use crate::{hot_reload::HotReloadComputePipeline, voxel_job::VoxelManager};
+use crate::{
+    hot_reload::HotReloadComputePipeline, model_discovery::DiscoveredModel, voxel_job::VoxelManager,
+};
 
 /// Thin facade that captures the frequently repeated allocator & queue Arcs
 /// so call sites only provide what semantically changes (e.g. target pipeline
@@ -24,7 +26,7 @@ impl VoxelSystem {
         initial_resolution: u32, memory_allocator: Arc<StandardMemoryAllocator>,
         descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
         command_buffer_allocator: Arc<StandardCommandBufferAllocator>, queue: Arc<Queue>,
-        render_pipeline: &HotReloadComputePipeline,
+        render_pipeline: &HotReloadComputePipeline, models: Option<Vec<DiscoveredModel>>,
     ) -> Self {
         let manager = VoxelManager::new(
             initial_resolution,
@@ -33,6 +35,7 @@ impl VoxelSystem {
             command_buffer_allocator.clone(),
             queue.clone(),
             render_pipeline,
+            models,
         );
         Self {
             manager,
