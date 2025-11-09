@@ -20,6 +20,7 @@ pub struct PersistedUiState {
     pub light_phi: f32,
     pub advanced_window_open: bool,
     pub future_grid_resolutions: Vec<u32>,
+    pub loaded_models: Vec<String>,
 }
 
 impl Default for PersistedUiState {
@@ -37,6 +38,7 @@ impl Default for PersistedUiState {
             light_phi: 0.6,
             advanced_window_open: false,
             future_grid_resolutions: Vec::new(),
+            loaded_models: Vec::new(),
         }
     }
 }

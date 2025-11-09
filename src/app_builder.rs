@@ -5,8 +5,8 @@ use winit::event_loop::EventLoop;
 
 use crate::{
     app::App, camera::Camera, frame_timer::FrameTimer, gpu::GpuContext,
-    input_controller::InputController, pipelines::PipelineManager, render_mode::RenderMode,
-    voxel_facade::VoxelSystem,
+    input_controller::InputController, model_discovery::discover_models,
+    pipelines::PipelineManager, render_mode::RenderMode, voxel_facade::VoxelSystem,
 };
 use winit_input_helper::WinitInputHelper;
 
@@ -70,6 +70,7 @@ impl AppBuilder {
         let pipelines = PipelineManager::new(gpu.device.clone(), &shaders_dir);
 
         // Voxel system
+        let available_models = discover_models();
         let voxel = VoxelSystem::new(
             self.initial_voxel_resolution,
             gpu.memory_allocator.clone(),
@@ -77,7 +78,7 @@ impl AppBuilder {
             gpu.command_buffer_allocator.clone(),
             gpu.queue.clone(),
             &pipelines.render,
-            None,
+            Some(Vec::new()),
         );
         let future_grid_resolutions = voxel.manager.grid_resolutions.clone();
 
@@ -96,6 +97,7 @@ impl AppBuilder {
             pipelines,
             voxel,
             future_grid_resolutions,
+            available_models,
             camera,
             self.render_mode,
             self.render_scale,

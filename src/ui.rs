@@ -29,6 +29,10 @@ impl App {
 
         let mut rebuild_render_targets = false;
         let mut mark_state_dirty = false;
+        let mut pending_add_indices: Vec<usize> = Vec::new();
+        let mut reset_to_defaults_models = false;
+        let mut reset_active_grids_to: Option<u32> = None;
+        self.ensure_add_model_selection_len();
         {
             let rcx_for_ui = self.rcx.as_mut().unwrap();
             rcx_for_ui.gui.immediate_ui(|gui| {
@@ -80,6 +84,9 @@ impl App {
                         ui_state_changed = true;
                     }
                     ui.separator();
+                    if self.voxel.manager.active_voxel_grids < 1 {
+                        self.voxel.manager.active_voxel_grids = 1;
+                    }
                     let max_grids = (self.voxel.manager.models.len() + 1).max(1) as u32;
                     let active_slider = egui::Slider::new(
                         &mut self.voxel.manager.active_voxel_grids,
@@ -155,6 +162,15 @@ impl App {
                         ui_state_changed = true;
                     }
 
+                    if ui
+                        .button("Add Models…")
+                        .on_hover_text("Select additional models to load into the scene")
+                        .clicked()
+                    {
+                        self.add_models_popup_open = true;
+                        self.add_models_selection.iter_mut().for_each(|s| *s = false);
+                    }
+
                     if ui.button("Reset UI to Defaults").clicked() {
                         let defaults = crate::ui_state::PersistedUiState::default();
                         let previous_scale = self.render_scale;
@@ -176,10 +192,8 @@ impl App {
                         let ct = theta_val.cos();
                         self.light_dir = [ct * phi_val.cos(), theta_val.sin(), ct * phi_val.sin()];
                         self.advanced_window_open = defaults.advanced_window_open;
-                        self.future_grid_resolutions =
-                            self.voxel.manager.grid_resolutions.clone();
-                        self.voxel.manager.future_grid_resolutions =
-                            self.future_grid_resolutions.clone();
+                        reset_to_defaults_models = true;
+                        reset_active_grids_to = Some(defaults.active_voxel_grids);
                         if (self.render_scale - previous_scale).abs() > f32::EPSILON {
                             rebuild_render_targets = true;
                         }
@@ -221,6 +235,72 @@ impl App {
                         format_with_commas((render_extent[0] * render_extent[1]) as u64)
                     ));
                 });
+
+            let mut add_window_open = self.add_models_popup_open;
+            let mut add_window_should_close = false;
+            egui::Window::new("Add Models")
+                .open(&mut add_window_open)
+                .collapsible(false)
+                .frame(egui::Frame::window(&ctx.style()).fill(translucent_fill))
+                .show(&ctx, |ui| {
+                    if self.available_models.is_empty() {
+                        ui.label("No models were discovered in the models directory.");
+                        if ui.button("Close").clicked() {
+                            add_window_should_close = true;
+                        }
+                        return;
+                    }
+                    ui.label("Select one or more models to add:");
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(240.0)
+                        .show(ui, |ui| {
+                            for (idx, model) in self.available_models.iter().enumerate() {
+                                let instance_count = self
+                                    .voxel
+                                    .manager
+                                    .models
+                                    .iter()
+                                    .filter(|m| App::model_key(m) == App::model_key(model))
+                                    .count();
+                                let label = if instance_count > 0 {
+                                    format!(
+                                        "{} (.{} ) — loaded x{}",
+                                        model.name, model.extension, instance_count
+                                    )
+                                } else {
+                                    format!("{} (.{} )", model.name, model.extension)
+                                };
+                                ui.checkbox(&mut self.add_models_selection[idx], label);
+                            }
+                        });
+                    ui.separator();
+                    let any_selected = self.add_models_selection.iter().any(|s| *s);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(any_selected, egui::Button::new("Add Selected"))
+                            .clicked()
+                        {
+                            pending_add_indices = self
+                                .add_models_selection
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(idx, sel)| sel.then_some(idx))
+                                .collect();
+                            add_window_should_close = true;
+                            self.add_models_selection.iter_mut().for_each(|s| *s = false);
+                            mark_state_dirty = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            add_window_should_close = true;
+                            self.add_models_selection.iter_mut().for_each(|s| *s = false);
+                        }
+                    });
+                });
+            if add_window_should_close {
+                add_window_open = false;
+            }
+            self.add_models_popup_open = add_window_open;
 
             let advanced_open_before = self.advanced_window_open;
             egui::Window::new("Advanced Tools")
@@ -387,6 +467,25 @@ impl App {
                 mark_state_dirty = true;
             }
         });
+        }
+
+        if reset_to_defaults_models {
+            self.set_loaded_models(Vec::new());
+            if let Some(target) = reset_active_grids_to {
+                let max_grids = (self.voxel.manager.models.len() + 1).max(1) as u32;
+                self.voxel.manager.active_voxel_grids = target.clamp(1, max_grids);
+            }
+            self.add_models_selection.iter_mut().for_each(|s| *s = false);
+            mark_state_dirty = true;
+        }
+        if !pending_add_indices.is_empty() {
+            let additions: Vec<_> = pending_add_indices
+                .into_iter()
+                .map(|idx| self.available_models[idx].clone())
+                .collect();
+            self.add_models_to_scene(additions);
+            self.add_models_selection.iter_mut().for_each(|s| *s = false);
+            mark_state_dirty = true;
         }
 
         if rebuild_render_targets {

@@ -17,6 +17,7 @@ use winit::{
 use crate::camera::Camera;
 use crate::frame_timer::FrameTimer;
 use crate::gpu::GpuContext;
+use crate::model_discovery::DiscoveredModel;
 use crate::pipelines::PipelineManager;
 // push_constants now handled inside frame_renderer
 use crate::app_builder::AppBuilder;
@@ -36,6 +37,9 @@ pub struct App {
     // Voxel subsystem
     pub(crate) voxel: VoxelSystem,
     pub(crate) future_grid_resolutions: Vec<u32>,
+    pub(crate) available_models: Vec<DiscoveredModel>,
+    pub(crate) add_models_popup_open: bool,
+    pub(crate) add_models_selection: Vec<bool>,
 
     pub(crate) camera: Camera,
     pub(crate) render_mode: RenderMode,
@@ -60,15 +64,20 @@ pub struct App {
 impl App {
     pub(crate) fn from_parts(
         gpu: GpuContext, pipelines: PipelineManager, voxel: VoxelSystem,
-        future_grid_resolutions: Vec<u32>, camera: Camera, render_mode: RenderMode,
-        render_scale: f32, input: InputController, frame_timer: FrameTimer, verbose_logging: bool,
+        future_grid_resolutions: Vec<u32>, available_models: Vec<DiscoveredModel>, camera: Camera,
+        render_mode: RenderMode, render_scale: f32, input: InputController,
+        frame_timer: FrameTimer, verbose_logging: bool,
     ) -> Self {
         let ui_state_path = default_ui_state_path();
+        let add_models_selection = vec![false; available_models.len()];
         let mut app = App {
             gpu,
             pipelines,
             voxel,
             future_grid_resolutions,
+            available_models,
+            add_models_popup_open: false,
+            add_models_selection,
             camera,
             render_mode,
             render_scale,
@@ -100,6 +109,53 @@ impl App {
 
     pub fn fps(&self) -> u32 {
         self.frame_timer.fps()
+    }
+
+    pub(crate) fn model_key(model: &DiscoveredModel) -> String {
+        format!("{}.{}", model.name, model.extension)
+    }
+
+    pub(crate) fn ensure_add_model_selection_len(&mut self) {
+        if self.add_models_selection.len() != self.available_models.len() {
+            self.add_models_selection = vec![false; self.available_models.len()];
+        }
+    }
+
+    fn models_from_keys(&self, keys: &[String]) -> Vec<DiscoveredModel> {
+        let mut out = Vec::new();
+        for key in keys {
+            if let Some(model) = self.available_models.iter().find(|m| Self::model_key(m) == *key) {
+                out.push(model.clone());
+            } else {
+                eprintln!("[ui] persisted model '{key}' no longer available; skipping");
+            }
+        }
+        out
+    }
+
+    pub(crate) fn set_loaded_models(&mut self, models: Vec<DiscoveredModel>) {
+        let placeholder_resolution = self.voxel.manager.voxel_resolution.max(8);
+        self.voxel.set_models(models, &self.pipelines.render, placeholder_resolution);
+        self.future_grid_resolutions = self.voxel.manager.grid_resolutions.clone();
+        self.voxel.manager.future_grid_resolutions = self.future_grid_resolutions.clone();
+        let max_grids = (self.voxel.manager.models.len() + 1).max(1) as u32;
+        self.voxel.manager.active_voxel_grids =
+            self.voxel.manager.active_voxel_grids.clamp(1, max_grids);
+        self.ensure_add_model_selection_len();
+    }
+
+    pub(crate) fn add_models_to_scene(&mut self, models: Vec<DiscoveredModel>) {
+        if models.is_empty() {
+            return;
+        }
+        let placeholder_resolution = self.voxel.manager.voxel_resolution.max(8);
+        self.voxel.add_models(models, &self.pipelines.render, placeholder_resolution);
+        self.future_grid_resolutions = self.voxel.manager.grid_resolutions.clone();
+        self.voxel.manager.future_grid_resolutions = self.future_grid_resolutions.clone();
+        let max_grids = (self.voxel.manager.models.len() + 1).max(1) as u32;
+        self.voxel.manager.active_voxel_grids =
+            self.voxel.manager.active_voxel_grids.clamp(1, max_grids);
+        self.ensure_add_model_selection_len();
     }
 
     // start_background_voxelization now handled by VoxelManager
@@ -204,6 +260,9 @@ impl App {
     }
 
     fn apply_persisted_state(&mut self, state: &PersistedUiState) {
+        let desired_models = self.models_from_keys(&state.loaded_models);
+        self.set_loaded_models(desired_models);
+
         self.render_mode = state.render_mode;
         self.always_instant = state.always_instant;
         self.hit_back = state.hit_back;
@@ -247,6 +306,7 @@ impl App {
             light_phi: self.light_phi,
             advanced_window_open: self.advanced_window_open,
             future_grid_resolutions: self.future_grid_resolutions.clone(),
+            loaded_models: self.voxel.manager.models.iter().map(App::model_key).collect(),
         }
     }
 

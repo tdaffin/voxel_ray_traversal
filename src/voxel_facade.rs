@@ -70,6 +70,36 @@ impl VoxelSystem {
         );
     }
 
+    pub fn add_models(
+        &mut self, models: Vec<DiscoveredModel>, render_pipeline: &HotReloadComputePipeline,
+        placeholder_resolution: u32,
+    ) {
+        self.manager.add_models(
+            models,
+            self.descriptor_set_allocator.clone(),
+            self.memory_allocator.clone(),
+            self.command_buffer_allocator.clone(),
+            self.queue.clone(),
+            render_pipeline,
+            placeholder_resolution,
+        );
+    }
+
+    pub fn set_models(
+        &mut self, models: Vec<DiscoveredModel>, render_pipeline: &HotReloadComputePipeline,
+        placeholder_resolution: u32,
+    ) {
+        self.manager.set_models(
+            models,
+            self.descriptor_set_allocator.clone(),
+            self.memory_allocator.clone(),
+            self.command_buffer_allocator.clone(),
+            self.queue.clone(),
+            render_pipeline,
+            placeholder_resolution,
+        );
+    }
+
     pub fn randomize_rotation(&mut self, index: usize, render_pipeline: &HotReloadComputePipeline) {
         self.manager.apply_random_rotation(
             index,

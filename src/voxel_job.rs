@@ -200,7 +200,7 @@ impl VoxelManager {
         render_pipeline: &HotReloadComputePipeline, models_override: Option<Vec<DiscoveredModel>>,
     ) -> Self {
         let models = models_override.unwrap_or_else(discover_models);
-        let model_count = models.len().max(1); // avoid div by zero in palette math
+        let model_count = models.len();
         let voxel_images_enabled = render_pipeline.layout().set_layouts()[1]
             .bindings()
             .contains_key(&crate::voxel::BINDING_VOXEL_IMAGES);
@@ -438,7 +438,7 @@ impl VoxelManager {
         let voxel_pending = vec![true; model_count];
         let voxel_progress = vec![(0, 0); model_count];
         let voxel_cancel_flag = Arc::new(AtomicBool::new(false));
-        let active_voxel_grids = model_count as u32;
+        let active_voxel_grids = model_count.max(1) as u32;
         Self {
             models,
             voxel_set,
@@ -926,6 +926,108 @@ impl VoxelManager {
             descriptor_set_allocator,
             render_pipeline,
             memory_allocator.clone(),
+        );
+    }
+
+    pub fn add_models(
+        &mut self, new_models: Vec<DiscoveredModel>,
+        descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+        memory_allocator: Arc<StandardMemoryAllocator>,
+        command_buffer_allocator: Arc<StandardCommandBufferAllocator>, queue: Arc<Queue>,
+        render_pipeline: &HotReloadComputePipeline, placeholder_resolution: u32,
+    ) {
+        if new_models.is_empty() {
+            return;
+        }
+        let placeholder_resolution = placeholder_resolution.max(8);
+        let storage_w = (self.voxel_resolution / 4).max(1);
+        let storage_h = (self.voxel_resolution / 4).max(1);
+        let storage_d = (self.voxel_resolution / 8).max(1);
+        for model in new_models {
+            self.models.push(model);
+            self.grid_resolutions.push(self.voxel_resolution);
+            self.grid_dims.push((
+                self.voxel_resolution,
+                self.voxel_resolution,
+                self.voxel_resolution,
+            ));
+            self.grid_storage.push((storage_w, storage_h, storage_d));
+            self.grid_user_transforms.push(identity_mat4());
+            self.grid_rotation_speeds.push(0.0);
+            self.grid_rotation_angles.push(0.0);
+            self.future_grid_resolutions.push(self.voxel_resolution);
+            self.voxel_views.push(None);
+            self.color_index_views.push(None);
+            self.voxel_pending.push(true);
+            self.voxel_progress.push((0, 0));
+            self.tile_mask_views.push(None);
+            self.tile_payloads.push(None);
+            self.tile_stats.push(None);
+            self.palette_slices.push(None);
+            self.palette_bases.push(0);
+            self.palette_lens.push(0);
+        }
+        self.regenerate(
+            descriptor_set_allocator,
+            memory_allocator,
+            command_buffer_allocator,
+            queue,
+            render_pipeline,
+            placeholder_resolution,
+        );
+        let max_grids = (self.models.len() + 1).max(1) as u32;
+        self.active_voxel_grids = self.active_voxel_grids.clamp(1, max_grids);
+    }
+
+    pub fn set_models(
+        &mut self, models: Vec<DiscoveredModel>,
+        descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+        memory_allocator: Arc<StandardMemoryAllocator>,
+        command_buffer_allocator: Arc<StandardCommandBufferAllocator>, queue: Arc<Queue>,
+        render_pipeline: &HotReloadComputePipeline, placeholder_resolution: u32,
+    ) {
+        self.cancel();
+        self.models.clear();
+        self.grid_resolutions.clear();
+        self.grid_dims.clear();
+        self.grid_storage.clear();
+        self.grid_user_transforms.clear();
+        self.grid_rotation_speeds.clear();
+        self.grid_rotation_angles.clear();
+        self.future_grid_resolutions.clear();
+        self.voxel_views.clear();
+        self.color_index_views.clear();
+        self.voxel_pending.clear();
+        self.voxel_progress.clear();
+        self.tile_mask_views.clear();
+        self.tile_payloads.clear();
+        self.tile_stats.clear();
+        self.palette_slices.clear();
+        self.palette_bases.clear();
+        self.palette_lens.clear();
+        self.active_voxel_grids = 1;
+
+        if models.is_empty() {
+            self.regenerate(
+                descriptor_set_allocator,
+                memory_allocator,
+                command_buffer_allocator,
+                queue,
+                render_pipeline,
+                placeholder_resolution.max(8),
+            );
+            self.active_voxel_grids = 1;
+            return;
+        }
+
+        self.add_models(
+            models,
+            descriptor_set_allocator,
+            memory_allocator,
+            command_buffer_allocator,
+            queue,
+            render_pipeline,
+            placeholder_resolution,
         );
     }
 
