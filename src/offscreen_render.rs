@@ -403,7 +403,6 @@ mod tests {
         );
     }
 
-    #[ignore = "pending investigation"]
     #[test]
     fn verify_all_green() {
         // 84, 105, 11x6
