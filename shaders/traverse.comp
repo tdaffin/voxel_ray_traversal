@@ -123,7 +123,7 @@ bool readVoxelCached(int gridIndex, ivec3 coord, inout uvec4 texel, inout ivec3 
             case -1:
                 return false;
             case 0:
-            return false;
+                return false;
             case 1:
                 return true;
         }
@@ -217,9 +217,10 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     ivec3 istep = ivec3(sgn_dir);
     vec3 delta = inv_dir * sgn_dir;
 
-    bool initialOccupied = false;
     uvec4 texel = uvec4(0);
     ivec3 texel_coord = toTexelCoord(icoord);
+    bool initialOccupied = readVoxelCached(gridIndex, icoord, texel, texel_coord);
+    /*bool initialOccupied = false;
     int type = readTexel(gridIndex, texel_coord, texel);
     switch (type){
         case -1:
@@ -230,7 +231,7 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
             initialOccupied = true;
         default:
             initialOccupied = isSolid(icoord, texel);
-    }
+    }*/
     bool hit = (pc.always_instant != 0u) || initialOccupied;
     if (!hit && dims.x == 1u && dims.y == 1u && dims.z == 1u) {
         uint mask_entry = imageLoad(tileMaskImages[gridIndex], ivec3(0)).r;
@@ -389,6 +390,8 @@ vec3 calc_color(HitAttributes hit)
                 else if (abs(idir.z) > 0)
                     dAxis = 2;
 
+                uvec4 texAO;
+                ivec3 texAOcoord = toTexelCoord(nbr);
                 int OFFS[2] = int[2](-1, 1);
                 int occ = 0;
                 int probes = 0;
@@ -401,8 +404,6 @@ vec3 calc_color(HitAttributes hit)
                         if (ax == 2) p.z += OFFS[oi];
                         if (p.x < 0 || p.y < 0 || p.z < 0 || p.x >= int(hit.dims.x) || p.y >= int(hit.dims.y) || p.z >= int(hit.dims.z))
                             continue;
-                        uvec4 texAO;
-                        ivec3 texAOcoord = ivec3(-1);
                         if (readVoxelCached(hit.gridIndex, p, texAO, texAOcoord)) {
                             occ++;
                         }
