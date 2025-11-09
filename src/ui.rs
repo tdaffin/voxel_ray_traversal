@@ -314,37 +314,13 @@ impl App {
                     ui.label("Each (resizable) grid can have its own resolution (multiple of 8).");
                     ui.separator();
 
-                    for i in 0..self.future_grid_resolutions.len() {
-                        let is_vox = self
-                            .voxel
-                            .manager
-                            .models
-                            .get(i)
-                            .map(|m| m.extension.as_str() == "vox")
-                            .unwrap_or(false);
-                        if is_vox {
-                            ui.label(format!("Grid {i} Res: native (.vox)"));
-                            continue;
-                        }
-                        let mut val = self.future_grid_resolutions[i];
-                        let label = format!("Grid {i} Res");
-                        if ui.add(egui::Slider::new(&mut val, 8..=4096).text(label)).changed() {
-                            val = val.div_ceil(8) * 8;
-                            self.future_grid_resolutions[i] = val;
-                            if let Some(entry) =
-                                self.voxel.manager.future_grid_resolutions.get_mut(i)
-                            {
-                                *entry = val;
-                            }
-                            mark_state_dirty = true;
-                        }
-                    }
-
-                    ui.separator();
-                    ui.label("Discovered Models:");
+                    ui.label("Loaded Models:");
                     let model_count = self.voxel.manager.models.len();
                     for i in 0..model_count {
-                        let model = &self.voxel.manager.models[i];
+                        let (model_name, model_extension) = {
+                            let m = &self.voxel.manager.models[i];
+                            (m.name.clone(), m.extension.clone())
+                        };
                         let dims = self.voxel.manager.grid_dims.get(i).copied().unwrap_or((
                             self.voxel.manager.grid_resolutions.get(i).copied().unwrap_or(0),
                             0,
@@ -371,67 +347,144 @@ impl App {
                         } else {
                             String::new()
                         };
-                        let label_text = format!(
+                        let header_text = format!(
                             "{}: {} (.{} ) dims={}{}",
-                            i, model.name, model.extension, dim_str, storage_note
+                            i, model_name, model_extension, dim_str, storage_note
                         );
-                        let speed_rad = self
-                            .voxel
-                            .manager
-                            .grid_rotation_speeds
-                            .get(i)
-                            .copied()
-                            .unwrap_or(0.0);
-                        let mut speed_deg = speed_rad.to_degrees();
-                        let mut speed_changed = false;
-                        ui.horizontal(|ui| {
-                            ui.label(&label_text);
-                            if ui
-                                .button(format!("Random rotation##{}", i))
-                                .on_hover_text("Apply a fresh random orientation to this grid")
-                                .clicked()
-                            {
-                                self.voxel.randomize_rotation(i, &self.pipelines.render);
-                            }
-                            ui.label("Spin:");
-                            let response = ui
-                                .add(
-                                    egui::DragValue::new(&mut speed_deg).speed(5.0).suffix("°/s"),
-                                )
-                                .on_hover_text("Rotation speed around the grid's vertical axis");
-                            if response.changed() {
-                                speed_changed = true;
-                            }
-                        });
-                        if speed_changed {
-                            if let Some(entry) = self.voxel.manager.grid_rotation_speeds.get_mut(i)
-                            {
-                                *entry = speed_deg.to_radians();
-                            }
-                        }
 
-                        if self
-                            .voxel
-                            .manager
-                            .voxel_pending
-                            .get(i)
-                            .copied()
-                            .unwrap_or(true)
-                        {
-                            ui.label("Compression: pending…");
-                        } else if let Some(stats) = self
-                            .voxel
-                            .manager
-                            .tile_stats
-                            .get(i)
-                            .and_then(|s| s.as_ref())
-                        {
-                            ui.label(format!(
-                                "Compression: empty={} uniform={} dense={}",
-                                format_with_commas(stats.empty_tiles as u64),
-                                format_with_commas(stats.uniform_tiles as u64),
-                                format_with_commas(stats.dense_tiles as u64)
-                            ));
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                let speed_rad = self
+                                    .voxel
+                                    .manager
+                                    .grid_rotation_speeds
+                                    .get(i)
+                                    .copied()
+                                    .unwrap_or(0.0);
+                                let mut speed_deg = speed_rad.to_degrees();
+                                let mut speed_changed = false;
+                                ui.horizontal(|ui| {
+                                    ui.label(&header_text);
+                                    if ui
+                                        .button("Randomize Orientation")
+                                        .on_hover_text("Apply a fresh random orientation to this grid")
+                                        .clicked()
+                                    {
+                                        self.voxel.randomize_rotation(i, &self.pipelines.render);
+                                    }
+                                    ui.label("Spin:");
+                                    let response = ui
+                                        .add(
+                                            egui::DragValue::new(&mut speed_deg)
+                                                .speed(5.0)
+                                                .suffix("°/s"),
+                                        )
+                                        .on_hover_text("Rotation speed around the grid's vertical axis");
+                                    if response.changed() {
+                                        speed_changed = true;
+                                    }
+                                });
+                                if speed_changed {
+                                    if let Some(entry) = self.voxel.manager.grid_rotation_speeds.get_mut(i)
+                                    {
+                                        *entry = speed_deg.to_radians();
+                                    }
+                                }
+
+                                let (done_tris, total_tris) = self
+                                    .voxel
+                                    .manager
+                                    .voxel_progress
+                                    .get(i)
+                                    .copied()
+                                    .unwrap_or((0, 0));
+                                let pending = self
+                                    .voxel
+                                    .manager
+                                    .voxel_pending
+                                    .get(i)
+                                    .copied()
+                                    .unwrap_or(true);
+
+                                if pending {
+                                    if total_tris > 0 {
+                                        let pct =
+                                            (done_tris as f32 / total_tris as f32 * 100.0).min(100.0);
+                                        ui.label(format!(
+                                            "Voxelization: {}/{} ({pct:.1}%)",
+                                            format_with_commas(done_tris as u64),
+                                            format_with_commas(total_tris as u64)
+                                        ));
+                                    } else {
+                                        ui.label("Voxelization: pending…");
+                                    }
+                                } else if total_tris > 0 {
+                                    ui.label(format!(
+                                        "Voxelization: ✓ ({} / {})",
+                                        format_with_commas(done_tris as u64),
+                                        format_with_commas(total_tris as u64)
+                                    ));
+                                } else {
+                                    ui.label("Voxelization: ✓");
+                                }
+
+                                let is_vox = model_extension.as_str() == "vox";
+                                if is_vox {
+                                    ui.label("Resolution: native (.vox)");
+                                } else {
+                                    let mut val = self
+                                        .future_grid_resolutions
+                                        .get(i)
+                                        .copied()
+                                        .unwrap_or_else(|| {
+                                            self.voxel
+                                                .manager
+                                                .grid_resolutions
+                                                .get(i)
+                                                .copied()
+                                                .unwrap_or(self.voxel.manager.voxel_resolution)
+                                        });
+                                    if ui
+                                        .add(
+                                            egui::Slider::new(&mut val, 8..=4096)
+                                                .text("Future Resolution"),
+                                        )
+                                        .changed()
+                                    {
+                                        val = val.div_ceil(8) * 8;
+                                        if i < self.future_grid_resolutions.len() {
+                                            self.future_grid_resolutions[i] = val;
+                                        }
+                                        if let Some(entry) =
+                                            self.voxel.manager.future_grid_resolutions.get_mut(i)
+                                        {
+                                            *entry = val;
+                                        }
+                                        mark_state_dirty = true;
+                                    }
+                                }
+
+                                if !pending {
+                                    if let Some(stats) = self
+                                        .voxel
+                                        .manager
+                                        .tile_stats
+                                        .get(i)
+                                        .and_then(|s| s.as_ref())
+                                    {
+                                        ui.label(format!(
+                                            "Compression: empty={} uniform={} dense={}",
+                                            format_with_commas(stats.empty_tiles as u64),
+                                            format_with_commas(stats.uniform_tiles as u64),
+                                            format_with_commas(stats.dense_tiles as u64)
+                                        ));
+                                    }
+                                }
+                            });
+                        });
+
+                        if i + 1 < model_count {
+                            ui.separator();
                         }
                     }
 
@@ -451,17 +504,6 @@ impl App {
                         total - remaining,
                         total
                     ));
-                    for (i, (done, total_tris)) in self.voxel.manager.voxel_progress.iter().enumerate()
-                    {
-                        let (d, t) = (*done, *total_tris);
-                        let pct = if t > 0 { (d as f32 / t as f32 * 100.0).min(100.0) } else { 0.0 };
-                        let status = if self.voxel.manager.voxel_pending[i] {
-                            if t > 0 { format!("{pct:.1}%") } else { "…".into() }
-                        } else {
-                            "✓".into()
-                        };
-                        ui.label(format!("Grid {i}: {status}"));
-                    }
                 });
             if self.advanced_window_open != advanced_open_before {
                 mark_state_dirty = true;
