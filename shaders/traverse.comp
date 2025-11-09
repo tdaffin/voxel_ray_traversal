@@ -566,8 +566,13 @@ void main() {
     //if (pixelCoord == debugCoord) { 
     if (pc.render_mode == DEBUG) {
         if (hitFound){
-            vec4 color = vec4(1, bestHit.gridIndex / float(gridCount), 1, 1);
-            imageStore(targetImage, pixelCoord, color);
+            vec3 paletteColor = vec3(1.0, 0.0, 1.0);
+            uint paletteLen = gridInfos[bestHit.gridIndex].paletteLen;
+            uint paletteBase = gridInfos[bestHit.gridIndex].paletteBase;
+            if (paletteLen > 0u && paletteBase < palette.length()) {
+                paletteColor = palette[paletteBase].rgb;
+            }
+            imageStore(targetImage, pixelCoord, vec4(paletteColor, 1.0));
         }
         //vec4 color = vec4(1, 0, 1, 1)
     }
