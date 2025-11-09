@@ -265,8 +265,25 @@ mod tests {
 
     fn full_snapshot() -> &'static RenderSnapshot {
         FULL_SNAPSHOT.get_or_init(|| {
-            render_offscreen_snapshot(256, 256, RenderMode::Shade, RenderSnapshotOptions::default())
+            make_full_snapshot()
         })
+    }
+
+    fn make_full_snapshot() -> RenderSnapshot {
+        let target = Vector3::new(-0.34, -0.28, -0.45);
+        let cam_pos = target + Vector3::new(-0.5, 0.5, 0.5);
+        let mut camera =
+            Camera::new(cam_pos, Vector3::zeros(), 
+            [256f64, 256f64], 
+            35.0);
+        camera.look_at(target);
+        render_offscreen_snapshot(256, 256, RenderMode::Shade,
+            RenderSnapshotOptions {
+                model_selection: SnapshotModelSelection::Named(&["teapot", "chr_cat", "chr_bow", "chr_fox"]),
+                camera: Some(camera),
+            },
+        )
+        //RenderSnapshotOptions::default()
     }
 
     static EMPTY_SNAPSHOT: OnceLock<RenderSnapshot> = OnceLock::new();
@@ -374,14 +391,16 @@ mod tests {
                 }
             }
         }
+        if (num_transparent > 0) {
+            let out_dir = out_dir();
+            let actual_path = out_dir.join("no_transparent.actual.png");
+            snapshot.save_png(&actual_path).expect("failed to write actual render output");
+        }
         assert_eq!(
             num_transparent, 0,
             "Found {} transparent pixels in the test area",
             num_transparent
         );
-        //let out_dir = out_dir();
-        //let actual_path = out_dir.join("no_transparent.actual.png");
-        //snapshot.save_png(&actual_path).expect("failed to write actual render output");
     }
 
     #[ignore = "pending investigation"]
@@ -389,8 +408,9 @@ mod tests {
     fn verify_all_green() {
         // 84, 105, 11x6
         let snapshot = full_snapshot();
+        //let mut snapshot = make_full_snapshot();
         let mut num_not_green = 0;
-        for y in 105..=111 {
+        for y in 165..=175 {
             for x in 84..=95 {
                 let idx = (y * snapshot.width as usize + x) * 4;
                 let px = &snapshot.pixels[idx..idx + 4];
@@ -399,11 +419,16 @@ mod tests {
                     num_not_green += 1;
                     println!("Pixel at ({},{}) is not green: #{:08X}", x, y, px32);
                 }
+                for i in 0..4 {
+                    //snapshot.pixels[idx + i] = 0;
+                }
             }
         }
+        if (num_not_green > 0) {
+            let out_dir = out_dir();
+            let actual_path = out_dir.join("all_green.actual.png");
+            snapshot.save_png(&actual_path).expect("failed to write actual render output");
+        }
         assert_eq!(num_not_green, 0, "Found {} non-green pixels in the test area", num_not_green);
-        //let out_dir = out_dir();
-        //let actual_path = out_dir.join("all_green.actual.png");
-        //snapshot.save_png(&actual_path).expect("failed to write actual render output");
     }
 }
