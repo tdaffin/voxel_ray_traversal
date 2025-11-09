@@ -77,35 +77,58 @@ vec3 stepsToInferno(uint steps, uint start, uint end) {
     return inferno(clamp(t, 0, 1));
 }
 
-// Reads occupancy of a voxel cell by reusing a cached packed texel when possible.
-// Returns true if the voxel at `coord` is filled, updating `texel` and `texel_coord` if a new block is fetched.
-bool readVoxel(int gridIndex, ivec3 coord, inout uvec4 texel, inout ivec3 texel_coord) {
-    ivec3 new_texel_coord = ivec3(coord.x / 4, coord.y / 4, coord.z / 8);
-    if (any(notEqual(new_texel_coord, texel_coord))) {
-        texel_coord = new_texel_coord;
-        uint mask_entry = imageLoad(tileMaskImages[gridIndex], texel_coord).r;
-        if ((mask_entry & TILE_EMPTY_BIT) != 0u) {
-            texel = uvec4(0);
-            return false;
-        }
-        if ((mask_entry & TILE_UNIFORM_BIT) != 0u) {
-            uint uniform_value = mask_entry & TILE_UNIFORM_VALUE_BIT;
-            texel = (uniform_value != 0u) ? uvec4(0xFFFFFFFFu) : uvec4(0);
-            return (uniform_value != 0u);
-        }
-        uint local_index = mask_entry & TILE_PAYLOAD_INDEX_MASK;
-        uint payload_len = gridInfos[gridIndex].tilePayloadLen;
-        if (local_index < payload_len) {
-            uint payload_index = gridInfos[gridIndex].tilePayloadBase + local_index;
-            texel = tilePayloadBuffer.words[payload_index];
-        } else {
-            texel = uvec4(0);
-        }
-    }
+ivec3 toTexelCoord(ivec3 coord) {
+    return ivec3(coord.x / 4, coord.y / 4, coord.z / 8);
+}
 
+/**
+* Returns -1 for empty tile, 0 for uniform empty, 1 for uniform full, 2 for payload tile.
+*/
+int readTexel(int gridIndex, ivec3 texel_coord, out uvec4 texel) {
+    uint mask_entry = imageLoad(tileMaskImages[gridIndex], texel_coord).r;
+    if ((mask_entry & TILE_EMPTY_BIT) != 0u) {
+        texel = uvec4(0);
+        return -1;
+    }
+    if ((mask_entry & TILE_UNIFORM_BIT) != 0u) {
+        uint uniform_value = mask_entry & TILE_UNIFORM_VALUE_BIT;
+        texel = (uniform_value != 0u) ? uvec4(0xFFFFFFFFu) : uvec4(0);
+        return (uniform_value != 0u) ? 1 : 0;
+    }
+    uint local_index = mask_entry & TILE_PAYLOAD_INDEX_MASK;
+    uint payload_len = gridInfos[gridIndex].tilePayloadLen;
+    if (local_index < payload_len) {
+        uint payload_index = gridInfos[gridIndex].tilePayloadBase + local_index;
+        texel = tilePayloadBuffer.words[payload_index];
+    } else {
+        texel = uvec4(0);
+    }
+    return 2;
+}
+
+bool isSolid(ivec3 coord, uvec4 texel) {
     uint lane = coord.x & 3u;
     uint bit_index = (coord.y & 3u) + ((coord.z & 7u) << 2u);
     return ((texel[lane] >> bit_index) & 1u) != 0u;
+}
+
+// Reads occupancy of a voxel cell by reusing a cached packed texel when possible.
+// Returns true if the voxel at `coord` is filled, updating `texel` and `texel_coord` if a new block is fetched.
+bool readVoxelCached(int gridIndex, ivec3 coord, inout uvec4 texel, inout ivec3 texel_coord) {
+    ivec3 new_texel_coord = toTexelCoord(coord);
+    if (any(notEqual(new_texel_coord, texel_coord))) {
+        texel_coord = new_texel_coord;
+        int type = readTexel(gridIndex, texel_coord, texel);
+        switch (type){
+            case -1:
+                return false;
+            case 0:
+            return false;
+            case 1:
+                return true;
+        }
+    }
+    return isSolid(coord, texel);
 }
 
 const float FLT_MAX = 3.4028235e+38;
@@ -194,9 +217,20 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
     ivec3 istep = ivec3(sgn_dir);
     vec3 delta = inv_dir * sgn_dir;
 
-    ivec3 texel_coord = ivec3(-1);
+    bool initialOccupied = false;
     uvec4 texel = uvec4(0);
-    bool initialOccupied = readVoxel(gridIndex, icoord, texel, texel_coord);
+    ivec3 texel_coord = toTexelCoord(icoord);
+    int type = readTexel(gridIndex, texel_coord, texel);
+    switch (type){
+        case -1:
+            break;
+        case 0:
+            break;
+        case 1:
+            initialOccupied = true;
+        default:
+            initialOccupied = isSolid(icoord, texel);
+    }
     bool hit = (pc.always_instant != 0u) || initialOccupied;
     if (!hit && dims.x == 1u && dims.y == 1u && dims.z == 1u) {
         uint mask_entry = imageLoad(tileMaskImages[gridIndex], ivec3(0)).r;
@@ -253,7 +287,7 @@ bool traversal(int gridIndex, vec3 origin, vec3 dir, uvec3 dims, vec3 roWorld, v
             }
             break;
         }
-        if (readVoxel(gridIndex, icoord, texel, texel_coord))
+        if (readVoxelCached(gridIndex, icoord, texel, texel_coord))
             hit = true;
     }
 
@@ -369,7 +403,7 @@ vec3 calc_color(HitAttributes hit)
                             continue;
                         uvec4 texAO;
                         ivec3 texAOcoord = ivec3(-1);
-                        if (readVoxel(hit.gridIndex, p, texAO, texAOcoord)) {
+                        if (readVoxelCached(hit.gridIndex, p, texAO, texAOcoord)) {
                             occ++;
                         }
                         probes++;
