@@ -1,5 +1,6 @@
 use nalgebra::{Matrix4, Vector3};
 
+#[derive(Clone, Debug)]
 pub struct Camera {
     pub position: Vector3<f64>,
     pub rotation: Vector3<f64>,

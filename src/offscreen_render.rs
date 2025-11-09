@@ -53,14 +53,15 @@ impl<'a> Default for SnapshotModelSelection<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RenderSnapshotOptions<'a> {
     pub model_selection: SnapshotModelSelection<'a>,
+    pub camera: Option<Camera>,
 }
 
 impl<'a> Default for RenderSnapshotOptions<'a> {
     fn default() -> Self {
-        Self { model_selection: SnapshotModelSelection::All }
+        Self { model_selection: SnapshotModelSelection::All, camera: None }
     }
 }
 
@@ -133,7 +134,10 @@ pub fn render_offscreen_snapshot(
         gpu.queue.clone(),
     );
 
-    let mut camera = {
+    let mut camera = if let Some(mut cam) = options.camera.clone() {
+        cam.extent = [width as f64, height as f64];
+        cam
+    } else {
         let target = Vector3::new(-0.34, -0.28, -0.45);
         let cam_pos = target + Vector3::new(-0.35, 0.45, 0.45);
         let mut camera =
@@ -261,9 +265,7 @@ mod tests {
 
     fn full_snapshot() -> &'static RenderSnapshot {
         FULL_SNAPSHOT.get_or_init(|| {
-            render_offscreen_snapshot(256, 256, RenderMode::Shade,
-                RenderSnapshotOptions::default()
-            )
+            render_offscreen_snapshot(256, 256, RenderMode::Shade, RenderSnapshotOptions::default())
         })
     }
 
@@ -271,9 +273,13 @@ mod tests {
 
     fn empty_snapshot() -> &'static RenderSnapshot {
         EMPTY_SNAPSHOT.get_or_init(|| {
-            render_offscreen_snapshot(256, 256, RenderMode::Shade,
+            render_offscreen_snapshot(
+                256,
+                256,
+                RenderMode::Shade,
                 RenderSnapshotOptions {
-                    model_selection: SnapshotModelSelection::Named(&[])
+                    model_selection: SnapshotModelSelection::Named(&[]),
+                    camera: None,
                 },
             )
         })
@@ -282,7 +288,7 @@ mod tests {
     fn out_dir() -> std::path::PathBuf {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/reference");
         std::fs::create_dir_all(&dir).expect("failed to create reference directory");
-        return dir
+        return dir;
     }
 
     #[test]
