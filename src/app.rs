@@ -43,6 +43,7 @@ pub struct App {
     pub(crate) always_instant: bool,
     pub(crate) hit_back: bool,
     pub(crate) verbose_logging: bool,
+    pub(crate) advanced_window_open: bool,
 
     input: InputController,
     frame_timer: FrameTimer,
@@ -68,6 +69,7 @@ impl App {
             always_instant: false,
             hit_back: false,
             verbose_logging,
+            advanced_window_open: false,
             input,
             frame_timer,
             rcx: None,

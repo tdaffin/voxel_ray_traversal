@@ -6,6 +6,16 @@ use crate::{app::App, render_mode::RenderMode, rendering::get_images_and_sets};
 /// (request_regen_voxels, trigger_benchmark)
 pub(crate) type UiActions = (bool, bool);
 
+fn format_with_commas(n: u64) -> String {
+    let mut s = n.to_string();
+    let mut i = 3;
+    while i < s.len() {
+        s.insert(s.len() - i, ',');
+        i += 4;
+    }
+    s
+}
+
 impl App {
     /// Draws all egui windows and mutates self state accordingly.
     /// Returns (request_regen_voxels, trigger_benchmark)
@@ -126,148 +136,20 @@ impl App {
                         );
                     }
 
-                    // Advanced section collapsed by default
-                    egui::CollapsingHeader::new("Advanced").default_open(false).show(ui, |ui| {
-                        ui.colored_label(
-                            Color32::LIGHT_RED,
-                            "Warning: Very high resolutions may exhaust GPU memory.",
-                        );
-                        ui.label(
-                            "Each (resizable) grid can have its own resolution (multiple of 8).",
-                        );
-                        for i in 0..self.future_grid_resolutions.len() {
-                            // Hide resolution slider for native .vox models which use intrinsic dimensions
-                            let is_vox = self
-                                .voxel
-                                .manager
-                                .models
-                                .get(i)
-                                .map(|m| m.extension.as_str() == "vox")
-                                .unwrap_or(false);
-                            if is_vox {
-                                ui.label(format!("Grid {i} Res: native (.vox)"));
-                                continue;
-                            }
-                            let mut val = self.future_grid_resolutions[i];
-                            let label = format!("Grid {i} Res");
-                            if ui.add(egui::Slider::new(&mut val, 8..=4096).text(label)).changed() {
-                                // snap to multiple of 8
-                                val = val.div_ceil(8) * 8;
-                                self.future_grid_resolutions[i] = val;
-                            }
-                        }
-                        ui.label("Discovered Models:");
-                        let model_count = self.voxel.manager.models.len();
-                        for i in 0..model_count {
-                            let model = &self.voxel.manager.models[i];
-                            let dims = self.voxel.manager.grid_dims.get(i).copied().unwrap_or((
-                                self.voxel.manager.grid_resolutions.get(i).copied().unwrap_or(0),
-                                0,
-                                0,
-                            ));
-                            let (dx, dy, dz) = dims;
-                            let storage =
-                                self.voxel.manager.grid_resolutions.get(i).copied().unwrap_or(0);
-                            let dim_str = if dx == dy && dy == dz {
-                                format!("{}³", dx)
-                            } else {
-                                format!("{}×{}×{}", dx, dy, dz)
-                            };
-                            let storage_note = if storage != dx || storage != dy || storage != dz {
-                                format!(" (storage cube {}³)", storage)
-                            } else {
-                                String::new()
-                            };
-                            let label_text = format!(
-                                "{}: {} (.{} ) dims={}{}",
-                                i, model.name, model.extension, dim_str, storage_note
-                            );
-                            let speed_rad = self
-                                .voxel
-                                .manager
-                                .grid_rotation_speeds
-                                .get(i)
-                                .copied()
-                                .unwrap_or(0.0);
-                            let mut speed_deg = speed_rad.to_degrees();
-                            let mut speed_changed = false;
-                            ui.horizontal(|ui| {
-                                ui.label(&label_text);
-                                if ui
-                                    .button(format!("Random rotation##{}", i))
-                                    .on_hover_text("Apply a fresh random orientation to this grid")
-                                    .clicked()
-                                {
-                                    self.voxel.randomize_rotation(i, &self.pipelines.render);
-                                }
-                                ui.label("Spin:");
-                                let response = ui
-                                    .add(
-                                        egui::DragValue::new(&mut speed_deg)
-                                            .speed(5.0)
-                                            .suffix("°/s"),
-                                    )
-                                    .on_hover_text(
-                                        "Rotation speed around the grid's vertical axis",
-                                    );
-                                if response.changed() {
-                                    speed_changed = true;
-                                }
-                            });
-                            if speed_changed {
-                                if let Some(entry) =
-                                    self.voxel.manager.grid_rotation_speeds.get_mut(i)
-                                {
-                                    *entry = speed_deg.to_radians();
-                                }
-                            }
-                        }
-                        if ui.button("Regenerate Grids").clicked() {
-                            request_regen_voxels = true;
-                        }
-                        if ui.button("Cancel Voxelization").clicked() {
-                            self.voxel.manager.cancel();
-                        }
-                        ui.separator();
-                        // Progress overview
-                        let total = self.voxel.manager.voxel_pending.len();
-                        let remaining =
-                            self.voxel.manager.voxel_pending.iter().filter(|b| **b).count();
-                        ui.label(format!(
-                            "Voxelization: {} / {} finished",
-                            total - remaining,
-                            total
-                        ));
-                        for (i, (done, total_tris)) in
-                            self.voxel.manager.voxel_progress.iter().enumerate()
-                        {
-                            let (d, t) = (*done, *total_tris);
-                            let pct =
-                                if t > 0 { (d as f32 / t as f32 * 100.0).min(100.0) } else { 0.0 };
-                            let status = if self.voxel.manager.voxel_pending[i] {
-                                if t > 0 { format!("{pct:.1}%") } else { "…".into() }
-                            } else {
-                                "✓".into()
-                            };
-                            ui.label(format!("Grid {i}: {status}"));
-                        }
-                    });
+                    ui.separator();
+                    if ui
+                        .button("Advanced Tools…")
+                        .on_hover_text("Open detailed voxel and model controls")
+                        .clicked()
+                    {
+                        self.advanced_window_open = true;
+                    }
                 });
 
             let fps_val = current_fps; // captured outside mutable borrow of self
             egui::Window::new("Stats")
                 .frame(egui::Frame::window(&ctx.style()).fill(translucent_fill))
                 .show(&ctx, |ui| {
-                    fn format_with_commas(n: u64) -> String {
-                        let mut s = n.to_string();
-                        let mut i = 3;
-                        while i < s.len() {
-                            s.insert(s.len() - i, ',');
-                            i += 4;
-                        }
-                        s
-                    }
-
                     ui.label(format!("FPS: {}", fps_val));
 
                     let voxel_resolution = self.voxel.manager.voxel_resolution as u64;
@@ -293,27 +175,159 @@ impl App {
                         format_with_commas(render_extent[1] as u64),
                         format_with_commas((render_extent[0] * render_extent[1]) as u64)
                     ));
-                    if !self.voxel.manager.tile_stats.is_empty() {
-                        ui.separator();
-                        ui.label("Compression Stats:");
-                        for (i, stats_opt) in self.voxel.manager.tile_stats.iter().enumerate() {
-                            if let Some(stats) = stats_opt {
-                                ui.label(format!(
-                                    "Grid {i}: empty={} uniform={} dense={}",
-                                    format_with_commas(stats.empty_tiles as u64),
-                                    format_with_commas(stats.uniform_tiles as u64),
-                                    format_with_commas(stats.dense_tiles as u64)
-                                ));
-                            }
+                });
+
+            egui::Window::new("Advanced Tools")
+                .open(&mut self.advanced_window_open)
+                .frame(egui::Frame::window(&ctx.style()).fill(translucent_fill))
+                .show(&ctx, |ui| {
+                    ui.colored_label(
+                        Color32::LIGHT_RED,
+                        "Warning: Very high resolutions may exhaust GPU memory.",
+                    );
+                    ui.label("Each (resizable) grid can have its own resolution (multiple of 8).");
+                    ui.separator();
+
+                    for i in 0..self.future_grid_resolutions.len() {
+                        let is_vox = self
+                            .voxel
+                            .manager
+                            .models
+                            .get(i)
+                            .map(|m| m.extension.as_str() == "vox")
+                            .unwrap_or(false);
+                        if is_vox {
+                            ui.label(format!("Grid {i} Res: native (.vox)"));
+                            continue;
+                        }
+                        let mut val = self.future_grid_resolutions[i];
+                        let label = format!("Grid {i} Res");
+                        if ui.add(egui::Slider::new(&mut val, 8..=4096).text(label)).changed() {
+                            val = val.div_ceil(8) * 8;
+                            self.future_grid_resolutions[i] = val;
                         }
                     }
-                    // List active grid dims summary
-                    if !self.voxel.manager.grid_dims.is_empty() {
-                        ui.separator();
-                        ui.label("Grid Dimensions:");
-                        for (i, (dx, dy, dz)) in self.voxel.manager.grid_dims.iter().enumerate() {
-                            ui.label(format!("Grid {i}: {}×{}×{}", dx, dy, dz));
+
+                    ui.separator();
+                    ui.label("Discovered Models:");
+                    let model_count = self.voxel.manager.models.len();
+                    for i in 0..model_count {
+                        let model = &self.voxel.manager.models[i];
+                        let dims = self.voxel.manager.grid_dims.get(i).copied().unwrap_or((
+                            self.voxel.manager.grid_resolutions.get(i).copied().unwrap_or(0),
+                            0,
+                            0,
+                        ));
+                        let storage_dims = self
+                            .voxel
+                            .manager
+                            .grid_storage
+                            .get(i)
+                            .copied()
+                            .unwrap_or((0, 0, 0));
+                        let (dx, dy, dz) = dims;
+                        let dim_str = if dx == dy && dy == dz {
+                            format!("{}³", dx)
+                        } else {
+                            format!("{}×{}×{}", dx, dy, dz)
+                        };
+                        let storage_note = if storage_dims != (dx, dy, dz) {
+                            format!(
+                                " (storage {}×{}×{})",
+                                storage_dims.0, storage_dims.1, storage_dims.2
+                            )
+                        } else {
+                            String::new()
+                        };
+                        let label_text = format!(
+                            "{}: {} (.{} ) dims={}{}",
+                            i, model.name, model.extension, dim_str, storage_note
+                        );
+                        let speed_rad = self
+                            .voxel
+                            .manager
+                            .grid_rotation_speeds
+                            .get(i)
+                            .copied()
+                            .unwrap_or(0.0);
+                        let mut speed_deg = speed_rad.to_degrees();
+                        let mut speed_changed = false;
+                        ui.horizontal(|ui| {
+                            ui.label(&label_text);
+                            if ui
+                                .button(format!("Random rotation##{}", i))
+                                .on_hover_text("Apply a fresh random orientation to this grid")
+                                .clicked()
+                            {
+                                self.voxel.randomize_rotation(i, &self.pipelines.render);
+                            }
+                            ui.label("Spin:");
+                            let response = ui
+                                .add(
+                                    egui::DragValue::new(&mut speed_deg).speed(5.0).suffix("°/s"),
+                                )
+                                .on_hover_text("Rotation speed around the grid's vertical axis");
+                            if response.changed() {
+                                speed_changed = true;
+                            }
+                        });
+                        if speed_changed {
+                            if let Some(entry) = self.voxel.manager.grid_rotation_speeds.get_mut(i)
+                            {
+                                *entry = speed_deg.to_radians();
+                            }
                         }
+
+                        if self
+                            .voxel
+                            .manager
+                            .voxel_pending
+                            .get(i)
+                            .copied()
+                            .unwrap_or(true)
+                        {
+                            ui.label("Compression: pending…");
+                        } else if let Some(stats) = self
+                            .voxel
+                            .manager
+                            .tile_stats
+                            .get(i)
+                            .and_then(|s| s.as_ref())
+                        {
+                            ui.label(format!(
+                                "Compression: empty={} uniform={} dense={}",
+                                format_with_commas(stats.empty_tiles as u64),
+                                format_with_commas(stats.uniform_tiles as u64),
+                                format_with_commas(stats.dense_tiles as u64)
+                            ));
+                        }
+                    }
+
+                    ui.separator();
+                    if ui.button("Regenerate Grids").clicked() {
+                        request_regen_voxels = true;
+                    }
+                    if ui.button("Cancel Voxelization").clicked() {
+                        self.voxel.manager.cancel();
+                    }
+
+                    ui.separator();
+                    let total = self.voxel.manager.voxel_pending.len();
+                    let remaining = self.voxel.manager.voxel_pending.iter().filter(|b| **b).count();
+                    ui.label(format!(
+                        "Voxelization: {} / {} finished",
+                        total - remaining,
+                        total
+                    ));
+                    for (i, (done, total_tris)) in self.voxel.manager.voxel_progress.iter().enumerate() {
+                        let (d, t) = (*done, *total_tris);
+                        let pct = if t > 0 { (d as f32 / t as f32 * 100.0).min(100.0) } else { 0.0 };
+                        let status = if self.voxel.manager.voxel_pending[i] {
+                            if t > 0 { format!("{pct:.1}%") } else { "…".into() }
+                        } else {
+                            "✓".into()
+                        };
+                        ui.label(format!("Grid {i}: {status}"));
                     }
                 });
         });
