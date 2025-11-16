@@ -264,22 +264,22 @@ mod tests {
     static FULL_SNAPSHOT: OnceLock<RenderSnapshot> = OnceLock::new();
 
     fn full_snapshot() -> &'static RenderSnapshot {
-        FULL_SNAPSHOT.get_or_init(|| {
-            make_full_snapshot(RenderMode::Shade)
-        })
+        FULL_SNAPSHOT.get_or_init(|| make_full_snapshot(RenderMode::Shade))
     }
 
     fn make_full_snapshot(render_mode: RenderMode) -> RenderSnapshot {
         let target = Vector3::new(-0.34, -0.28, -0.45);
         let cam_pos = target + Vector3::new(-0.5, 0.5, 0.5);
-        let mut camera =
-            Camera::new(cam_pos, Vector3::zeros(), 
-            [256f64, 256f64], 
-            35.0);
+        let mut camera = Camera::new(cam_pos, Vector3::zeros(), [256f64, 256f64], 35.0);
         camera.look_at(target);
-        render_offscreen_snapshot(256, 256, render_mode,
+        render_offscreen_snapshot(
+            256,
+            256,
+            render_mode,
             RenderSnapshotOptions {
-                model_selection: SnapshotModelSelection::Named(&["teapot", "chr_cat", "chr_bow", "chr_fox"]),
+                model_selection: SnapshotModelSelection::Named(&[
+                    "teapot", "chr_cat", "chr_bow", "chr_fox",
+                ]),
                 camera: Some(camera),
             },
         )
