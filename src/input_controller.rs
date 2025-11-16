@@ -42,8 +42,16 @@ impl InputController {
                     .clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
                 camera.rotation.y = camera.rotation.y.rem_euclid(std::f64::consts::TAU);
                 let ds = self.helper.scroll_diff();
-                let tanfov = (camera.fov.to_radians() * 0.5).tan();
-                camera.fov = ((tanfov * (ds.1 as f64 * -0.1).exp()).atan() * 2.0).to_degrees();
+                //let tanfov = (camera.fov.to_radians() * 0.5).tan();
+                //camera.fov = ((tanfov * (ds.1 as f64 * -0.1).exp()).atan() * 2.0).to_degrees();
+                if ds.1 != 0.0 {
+                    let scroll_delta = ds.1 as f64;
+                    // Dolly by moving along the current forward direction instead of changing FOV.
+                    let forward =
+                        (camera.rotation_matrix() * Vector3::new(0.0, 1.0, 0.0).push(0.0)).xyz();
+                    let zoom_speed = 0.1;
+                    camera.position += forward * scroll_delta * zoom_speed;
+                }
             }
         }
         if self.helper.mouse_pressed(MouseButton::Left) && !self.focused {
