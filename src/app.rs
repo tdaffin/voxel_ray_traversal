@@ -1,4 +1,4 @@
-use crate::input_controller::InputController;
+use crate::input_controller::{InputController, ZoomSampleContext};
 use egui_winit_vulkano::{Gui, GuiConfig};
 use std::{path::PathBuf, sync::Arc};
 use vulkano::{
@@ -27,6 +27,7 @@ use crate::rendering::{RenderContext, get_images_and_sets, get_swapchain_images,
 use crate::swapchain_manager::SwapchainManager;
 use crate::ui_state::{PersistedUiState, default_ui_state_path, load_ui_state, save_ui_state};
 use crate::voxel_facade::VoxelSystem;
+use crate::zoom_depth_sampler::ZoomDepthSampler;
 use nalgebra::Vector3;
 
 const INITIAL_WINDOW_RESOLUTION: PhysicalSize<u32> = PhysicalSize::new(960, 960);
@@ -54,6 +55,7 @@ pub struct App {
     pub(crate) advanced_window_open: bool,
 
     input: InputController,
+    zoom_sampler: ZoomDepthSampler,
     frame_timer: FrameTimer,
 
     ui_state_dirty: bool,
@@ -71,6 +73,11 @@ impl App {
     ) -> Self {
         let ui_state_path = default_ui_state_path();
         let add_models_selection = vec![false; available_models.len()];
+        let zoom_sampler = ZoomDepthSampler::new(
+            gpu.memory_allocator.clone(),
+            gpu.command_buffer_allocator.clone(),
+            gpu.queue.clone(),
+        );
         let mut app = App {
             gpu,
             pipelines,
@@ -90,6 +97,7 @@ impl App {
             verbose_logging,
             advanced_window_open: false,
             input,
+            zoom_sampler,
             frame_timer,
             ui_state_dirty: false,
             ui_state_path: ui_state_path.clone(),
@@ -169,8 +177,18 @@ impl App {
             return;
         }
         let rcx = self.rcx.as_mut().unwrap();
+        let render_extent = rcx.render_image.extent();
+        let mut zoom_ctx = if render_extent[0] == 0 || render_extent[1] == 0 {
+            None
+        } else {
+            Some(ZoomSampleContext {
+                sampler: &mut self.zoom_sampler,
+                depth_image: rcx.depth_image.clone(),
+                render_extent: [render_extent[0], render_extent[1]],
+            })
+        };
         // Update input (camera movement, focus toggles)
-        self.input.update(&mut self.camera, &rcx.window);
+        self.input.update(&mut self.camera, &rcx.window, zoom_ctx.as_mut());
         // Drain any completed voxelization results and upload to GPU
         let delta_seconds =
             self.input.helper().delta_time().map(|d| d.as_secs_f32()).unwrap_or(0.0);
@@ -358,15 +376,20 @@ impl App {
                 (window_extent[0] as f32 * self.render_scale) as u32,
                 (window_extent[1] as f32 * self.render_scale) as u32,
             ];
-            (rcx.render_image, rcx.render_set, rcx.resample_image, rcx.resample_set) =
-                get_images_and_sets(
-                    self.gpu.memory_allocator.clone(),
-                    self.gpu.descriptor_set_allocator.clone(),
-                    &self.pipelines.render,
-                    &self.pipelines.resample,
-                    render_extent,
-                    window_extent,
-                );
+            (
+                rcx.render_image,
+                rcx.depth_image,
+                rcx.render_set,
+                rcx.resample_image,
+                rcx.resample_set,
+            ) = get_images_and_sets(
+                self.gpu.memory_allocator.clone(),
+                self.gpu.descriptor_set_allocator.clone(),
+                &self.pipelines.render,
+                &self.pipelines.resample,
+                render_extent,
+                window_extent,
+            );
         }
     }
 }
@@ -396,14 +419,15 @@ impl ApplicationHandler for App {
             (window_extent[0] as f32 * self.render_scale) as u32,
             (window_extent[1] as f32 * self.render_scale) as u32,
         ];
-        let (render_image, render_set, resample_image, resample_set) = get_images_and_sets(
-            self.gpu.memory_allocator.clone(),
-            self.gpu.descriptor_set_allocator.clone(),
-            &self.pipelines.render,
-            &self.pipelines.resample,
-            render_extent,
-            window_extent,
-        );
+        let (render_image, depth_image, render_set, resample_image, resample_set) =
+            get_images_and_sets(
+                self.gpu.memory_allocator.clone(),
+                self.gpu.descriptor_set_allocator.clone(),
+                &self.pipelines.render,
+                &self.pipelines.resample,
+                render_extent,
+                window_extent,
+            );
 
         let gui = Gui::new(
             event_loop,
@@ -420,6 +444,7 @@ impl ApplicationHandler for App {
             swapchain,
             image_views,
             render_image,
+            depth_image,
             render_set,
             resample_image,
             resample_set,

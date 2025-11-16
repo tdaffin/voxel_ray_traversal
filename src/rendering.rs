@@ -21,6 +21,7 @@ pub struct RenderContext {
     pub swapchain: Arc<Swapchain>,
     pub image_views: Vec<Arc<ImageView>>,
     pub render_image: Arc<Image>,
+    pub depth_image: Arc<Image>,
     pub render_set: Arc<DescriptorSet>,
     pub resample_image: Arc<Image>,
     pub resample_set: Arc<DescriptorSet>,
@@ -125,6 +126,28 @@ pub fn get_render_image(
     (image, image_view)
 }
 
+pub fn get_depth_image(
+    memory_allocator: Arc<StandardMemoryAllocator>, extent: [u32; 2],
+) -> (Arc<Image>, Arc<ImageView>) {
+    let image = Image::new(
+        memory_allocator,
+        ImageCreateInfo {
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+            format: Format::R32_SFLOAT,
+            extent: [extent[0], extent[1], 1],
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let image_view =
+        ImageView::new(image.clone(), ImageViewCreateInfo::from_image(&image)).unwrap();
+    (image, image_view)
+}
+
 pub fn get_resample_image(
     memory_allocator: Arc<StandardMemoryAllocator>, extent: [u32; 2],
 ) -> (Arc<Image>, Arc<ImageView>) {
@@ -152,14 +175,18 @@ pub fn get_images_and_sets(
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     render_pipeline: &ComputePipeline, resample_pipeline: &ComputePipeline,
     render_extent: [u32; 2], window_extent: [u32; 2],
-) -> (Arc<Image>, Arc<DescriptorSet>, Arc<Image>, Arc<DescriptorSet>) {
+) -> (Arc<Image>, Arc<Image>, Arc<DescriptorSet>, Arc<Image>, Arc<DescriptorSet>) {
     let (render_image, render_image_view) =
         get_render_image(memory_allocator.clone(), render_extent);
+    let (depth_image, depth_image_view) = get_depth_image(memory_allocator.clone(), render_extent);
     let layout = render_pipeline.layout().set_layouts()[0].clone();
     let render_set = DescriptorSet::new(
         descriptor_set_allocator.clone(),
         layout,
-        [WriteDescriptorSet::image_view(0, render_image_view.clone())],
+        [
+            WriteDescriptorSet::image_view(0, render_image_view.clone()),
+            WriteDescriptorSet::image_view(1, depth_image_view.clone()),
+        ],
         [],
     )
     .unwrap();
@@ -175,5 +202,5 @@ pub fn get_images_and_sets(
         [],
     )
     .unwrap();
-    (render_image, render_set, resample_image, resample_set)
+    (render_image, depth_image, render_set, resample_image, resample_set)
 }

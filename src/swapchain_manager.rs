@@ -46,15 +46,20 @@ impl SwapchainManager {
                 (window_extent[0] as f32 * render_scale) as u32,
                 (window_extent[1] as f32 * render_scale) as u32,
             ];
-            (rcx.render_image, rcx.render_set, rcx.resample_image, rcx.resample_set) =
-                get_images_and_sets(
-                    gpu.memory_allocator.clone(),
-                    gpu.descriptor_set_allocator.clone(),
-                    &pipelines.render,
-                    &pipelines.resample,
-                    render_extent,
-                    window_extent,
-                );
+            (
+                rcx.render_image,
+                rcx.depth_image,
+                rcx.render_set,
+                rcx.resample_image,
+                rcx.resample_set,
+            ) = get_images_and_sets(
+                gpu.memory_allocator.clone(),
+                gpu.descriptor_set_allocator.clone(),
+                &pipelines.render,
+                &pipelines.resample,
+                render_extent,
+                window_extent,
+            );
             rcx.recreate_swapchain = false;
             true
         } else {

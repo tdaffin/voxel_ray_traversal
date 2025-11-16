@@ -27,6 +27,7 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 layout(set = 0, binding = 0, rgba8) writeonly uniform image2D targetImage;
+layout(set = 0, binding = 1, r32f) writeonly uniform image2D depthImage;
 // Runtime-sized array of voxel grids (descriptor array only)
 // Fixed-size descriptor array to simplify host binding (avoid runtime descriptor array issues)
 const int MAX_GRIDS = 32;
@@ -593,6 +594,8 @@ void main() {
             imageStore(targetImage, pixelCoord, vec4(color, 1));
         }
     }
+    float depthValue = bestDistance;
+    imageStore(depthImage, pixelCoord, vec4(depthValue, 0.0, 0.0, 0.0));
     //if (pixelCoord == debugCoord) { 
     if (pc.render_mode == DEBUG) {
         if (hitFound){

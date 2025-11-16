@@ -26,6 +26,7 @@ mod voxel_facade;
 mod voxel_job;
 mod voxelize;
 mod voxelize_vox;
+mod zoom_depth_sampler;
 use app::App;
 
 // RenderContext moved to rendering module
