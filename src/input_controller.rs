@@ -40,8 +40,8 @@ impl InputController {
                 self.helper.delta_time().as_ref().map(std::time::Duration::as_secs_f64)
             {
                 let t = |k: KeyCode| self.helper.key_held(k) as u8 as f64;
-                let v = Vector3::new(KeyCode::KeyD, KeyCode::KeyW, KeyCode::KeyQ).map(t)
-                    - Vector3::new(KeyCode::KeyA, KeyCode::KeyS, KeyCode::KeyE).map(t);
+                let v = Vector3::new(KeyCode::KeyD, KeyCode::KeyW, KeyCode::KeyR).map(t)
+                    - Vector3::new(KeyCode::KeyA, KeyCode::KeyS, KeyCode::KeyF).map(t);
                 camera.position += (camera.rotation_matrix() * v.push(0.0) * dt).xyz();
                 let sens = camera.mouse_sensitivity * (camera.fov.to_radians() * 0.5).tan();
                 let (dx, dy) = self.helper.mouse_diff();
