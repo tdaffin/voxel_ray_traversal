@@ -14,6 +14,11 @@ pub struct PushConstants {
     pub hit_back: u32,
 }
 
+pub struct PushConstantsBuild {
+    pub push_constants: PushConstants,
+    pub scene_extent: f32,
+}
+
 pub struct PushConstantsInput<'a> {
     pub cam_pixel_to_ray: Matrix4<f64>,
     pub voxel: &'a VoxelManager,
@@ -23,43 +28,8 @@ pub struct PushConstantsInput<'a> {
     pub hit_back: bool,
 }
 
-pub fn build_push_constants(input: PushConstantsInput) -> PushConstants {
-    // Derive scene AABB from grid origins + dims (x extent only currently; y,z start at 0)
-    let mut max_x = 0.0f64;
-    let mut max_y = 0.0f64;
-    let mut max_z = 0.0f64;
-    // Reconstruct 2D packing (must match voxel_job.rs packing heuristic):
-    let mut cursor = 0.0f64;
-    let mut row_y = 0.0f64;
-    let mut row_max_height = 0.0f64;
-    for (dx, dy, dz) in input.voxel.grid_dims.iter() {
-        // If adding this would exceed threshold, wrap to next row.
-        if cursor > 0.0 && cursor + (*dx as f64 * 1.25) > 512.0 {
-            // threshold mirrors job.rs
-            // finalize previous row
-            max_x = max_x.max(cursor);
-            row_y += row_max_height;
-            cursor = 0.0;
-            row_max_height = 0.0;
-        }
-        let origin_x = cursor;
-        let origin_y = row_y;
-        max_x = max_x.max(origin_x + *dx as f64);
-        max_y = max_y.max(origin_y + *dy as f64);
-        max_z = max_z.max(*dz as f64);
-        cursor += *dx as f64 * 1.25;
-        row_max_height = row_max_height.max(*dy as f64 * 1.25);
-    }
-    // account last row
-    max_x = max_x.max(cursor);
-    if max_x <= 0.0 || max_y <= 0.0 || max_z <= 0.0 {
-        let size = input.voxel.voxel_resolution as f64;
-        max_x = size;
-        max_y = size;
-        max_z = size;
-    }
-    // Uniform scale to largest dimension to avoid anisotropic distortion.
-    let largest = max_x.max(max_y).max(max_z).max(1.0);
+pub fn build_push_constants(input: PushConstantsInput) -> PushConstantsBuild {
+    let largest = compute_scene_extent(input.voxel);
     let mut scale_and_center64 = Matrix4::<f64>::identity();
     scale_and_center64[(0, 0)] = largest;
     scale_and_center64[(1, 1)] = largest;
@@ -76,12 +46,47 @@ pub fn build_push_constants(input: PushConstantsInput) -> PushConstants {
         [v[0] / len, v[1] / len, v[2] / len, 0.0]
     };
 
-    PushConstants {
-        pixel_to_ray: pixel_to_ray.cast(),
-        light_dir: ld,
-        voxel_count,
-        render_mode: input.render_mode,
-        always_instant: input.always_instant as u32,
-        hit_back: input.hit_back as u32,
+    PushConstantsBuild {
+        push_constants: PushConstants {
+            pixel_to_ray: pixel_to_ray.cast(),
+            light_dir: ld,
+            voxel_count,
+            render_mode: input.render_mode,
+            always_instant: input.always_instant as u32,
+            hit_back: input.hit_back as u32,
+        },
+        scene_extent: largest as f32,
     }
+}
+
+fn compute_scene_extent(voxel: &VoxelManager) -> f64 {
+    let mut max_x = 0.0f64;
+    let mut max_y = 0.0f64;
+    let mut max_z = 0.0f64;
+    let mut cursor = 0.0f64;
+    let mut row_y = 0.0f64;
+    let mut row_max_height = 0.0f64;
+    for (dx, dy, dz) in voxel.grid_dims.iter() {
+        if cursor > 0.0 && cursor + (*dx as f64 * 1.25) > 512.0 {
+            max_x = max_x.max(cursor);
+            row_y += row_max_height;
+            cursor = 0.0;
+            row_max_height = 0.0;
+        }
+        let origin_x = cursor;
+        let origin_y = row_y;
+        max_x = max_x.max(origin_x + *dx as f64);
+        max_y = max_y.max(origin_y + *dy as f64);
+        max_z = max_z.max(*dz as f64);
+        cursor += *dx as f64 * 1.25;
+        row_max_height = row_max_height.max(*dy as f64 * 1.25);
+    }
+    max_x = max_x.max(cursor);
+    if max_x <= 0.0 || max_y <= 0.0 || max_z <= 0.0 {
+        let size = voxel.voxel_resolution as f64;
+        max_x = size;
+        max_y = size;
+        max_z = size;
+    }
+    max_x.max(max_y).max(max_z).max(1.0)
 }

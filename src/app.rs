@@ -46,6 +46,7 @@ pub struct App {
     pub(crate) camera: Camera,
     pub(crate) render_mode: RenderMode,
     pub(crate) render_scale: f32,
+    pub(crate) display_depth_image: bool,
     pub(crate) light_dir: [f32; 3],
     pub(crate) light_theta: f32,
     pub(crate) light_phi: f32,
@@ -89,6 +90,7 @@ impl App {
             camera,
             render_mode,
             render_scale,
+            display_depth_image: false,
             light_dir: [0.5, 0.8, 0.3],
             light_theta: 0.9,
             light_phi: 0.6,
@@ -260,6 +262,7 @@ impl App {
             self.light_dir,
             self.always_instant,
             self.hit_back,
+            self.display_depth_image,
         );
 
         let render_future =
@@ -287,6 +290,7 @@ impl App {
         self.hit_back = state.hit_back;
         self.verbose_logging = state.verbose_logging;
         self.render_scale = state.render_scale.clamp(0.125, 8.0);
+        self.display_depth_image = state.display_depth_image;
         self.camera.fov = state.camera_fov.clamp(0.0, 180.0);
         self.camera.mouse_sensitivity = state.mouse_sensitivity.clamp(0.0005_f64, 0.01_f64);
         if let Some(position) = state.camera_position {
@@ -330,6 +334,7 @@ impl App {
             hit_back: self.hit_back,
             verbose_logging: self.verbose_logging,
             render_scale: self.render_scale,
+            display_depth_image: self.display_depth_image,
             active_voxel_grids: self.voxel.manager.active_voxel_grids,
             camera_fov: self.camera.fov,
             camera_position: Some([

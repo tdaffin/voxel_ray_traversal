@@ -30,7 +30,7 @@ use crate::{
     pipelines::PipelineManager,
     push_constants::{PushConstantsInput, build_push_constants},
     render_mode::RenderMode,
-    rendering::get_render_image,
+    rendering::{get_depth_image, get_render_image},
     voxel_facade::VoxelSystem,
 };
 
@@ -149,11 +149,15 @@ pub fn render_offscreen_snapshot(
 
     let (render_image, render_view) =
         get_render_image(gpu.memory_allocator.clone(), [width, height]);
+    let (_depth_image, depth_view) = get_depth_image(gpu.memory_allocator.clone(), [width, height]);
     let layout = pipelines.render.layout().set_layouts()[0].clone();
     let render_set = DescriptorSet::new(
         gpu.descriptor_set_allocator.clone(),
         layout,
-        [WriteDescriptorSet::image_view(0, render_view.clone())],
+        [
+            WriteDescriptorSet::image_view(0, render_view.clone()),
+            WriteDescriptorSet::image_view(1, depth_view.clone()),
+        ],
         [],
     )
     .expect("failed to create render descriptor set");
@@ -165,7 +169,8 @@ pub fn render_offscreen_snapshot(
         light_dir: [0.5, 0.8, 0.3],
         always_instant: false,
         hit_back: false,
-    });
+    })
+    .push_constants;
 
     let pixel_count = (width * height) as usize;
     let staging: Subbuffer<[u8]> = Buffer::new_slice(

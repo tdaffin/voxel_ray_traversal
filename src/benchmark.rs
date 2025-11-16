@@ -87,7 +87,8 @@ pub fn run(ctx: &mut BenchmarkContext) -> BenchmarkOutcome {
                 light_dir: [0.5, 0.8, 0.3],
                 always_instant: ctx.always_instant,
                 hit_back: ctx.hit_back,
-            });
+            })
+            .push_constants;
             let mut builder = AutoCommandBufferBuilder::primary(
                 ctx.command_buffer_allocator.clone(),
                 ctx.queue.queue_family_index(),

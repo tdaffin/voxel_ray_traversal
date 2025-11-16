@@ -4,6 +4,27 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0, rgba8) readonly uniform image2D inputImage;
 layout(set = 0, binding = 1, rgba8) writeonly uniform image2D outputImage;
+layout(set = 0, binding = 2, r32f) readonly uniform image2D depthImage;
+
+layout(push_constant) uniform ResampleOptions {
+    uint displayDepth;
+    float depthScale;
+} resampleOptions;
+
+const float FLT_MAX_VALUE = 3.4028235e+38;
+
+vec4 sample_pixel(ivec2 coord) {
+    if (resampleOptions.displayDepth == 0u) {
+        return imageLoad(inputImage, coord);
+    }
+    float depth = imageLoad(depthImage, coord).r;
+    if (isnan(depth) || isinf(depth) || depth >= FLT_MAX_VALUE) {
+        return vec4(vec3(0.0), 1.0);
+    }
+    float scaled = depth * max(resampleOptions.depthScale, 1e-6);
+    float grayscale = clamp(1.0 / (1.0 + scaled), 0.0, 1.0);
+    return vec4(vec3(grayscale), 1.0);
+}
 
 void main() {
     ivec2 outputCoords = ivec2(gl_GlobalInvocationID.xy);
@@ -29,7 +50,7 @@ void main() {
             vec2 overlapSize = max(overlapMax - overlapMin, 0.0);
             float overlapArea = overlapSize.x * overlapSize.y;
 
-            areaWeightedSum += imageLoad(inputImage, ivec2(x, y)) * overlapArea;
+            areaWeightedSum += sample_pixel(ivec2(x, y)) * overlapArea;
         }
     }
 

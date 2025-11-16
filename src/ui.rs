@@ -153,6 +153,13 @@ impl App {
                         rebuild_render_targets = true;
                         ui_state_changed = true;
                     }
+                    if ui
+                        .checkbox(&mut self.display_depth_image, "Show depth buffer")
+                        .on_hover_text("Preview the raw depth storage image instead of shaded color output")
+                        .changed()
+                    {
+                        ui_state_changed = true;
+                    }
 
                     ui.separator();
                     if ui

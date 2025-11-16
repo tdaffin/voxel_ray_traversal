@@ -198,6 +198,7 @@ pub fn get_images_and_sets(
         [
             WriteDescriptorSet::image_view(0, render_image_view.clone()),
             WriteDescriptorSet::image_view(1, resample_image_view.clone()),
+            WriteDescriptorSet::image_view(2, depth_image_view.clone()),
         ],
         [],
     )
