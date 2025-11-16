@@ -62,7 +62,7 @@ impl InputController {
                         (camera.rotation_matrix() * Vector3::new(0.0, 1.0, 0.0).push(0.0)).xyz();
                     let zoom_speed = 0.2;
                     let mut move_amount = scroll_delta * zoom_speed;
-                    if move_amount > 0.0 {
+                    if move_amount != 0.0 {
                         if let Some(ctx) = zoom_context {
                             if ctx.render_extent[0] > 0 && ctx.render_extent[1] > 0 {
                                 let focus = [ctx.render_extent[0] / 2, ctx.render_extent[1] / 2];
@@ -71,10 +71,11 @@ impl InputController {
                                     ctx.render_extent,
                                     focus,
                                 ) {
-                                    let safety_margin = 1.0;
-                                    let max_step = (depth - safety_margin).max(0.0);
-                                    move_amount = move_amount.min(max_step);
-                                    //move_amount = depth/10.0;
+                                    //println!("Zoom depth sample: {}", depth);
+                                    //let safety_margin = 1.0;
+                                    //let max_step = (depth - safety_margin).max(0.0);
+                                    //move_amount = move_amount.min(max_step);
+                                    move_amount = move_amount.signum() * depth / 10000.0;
                                 }
                             }
                         }
