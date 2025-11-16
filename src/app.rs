@@ -27,6 +27,7 @@ use crate::rendering::{RenderContext, get_images_and_sets, get_swapchain_images,
 use crate::swapchain_manager::SwapchainManager;
 use crate::ui_state::{PersistedUiState, default_ui_state_path, load_ui_state, save_ui_state};
 use crate::voxel_facade::VoxelSystem;
+use nalgebra::Vector3;
 
 const INITIAL_WINDOW_RESOLUTION: PhysicalSize<u32> = PhysicalSize::new(960, 960);
 
@@ -270,6 +271,18 @@ impl App {
         self.render_scale = state.render_scale.clamp(0.125, 8.0);
         self.camera.fov = state.camera_fov.clamp(0.0, 180.0);
         self.camera.mouse_sensitivity = state.mouse_sensitivity.clamp(0.0005_f64, 0.01_f64);
+        if let Some(position) = state.camera_position {
+            self.camera.position = Vector3::new(position[0], position[1], position[2]);
+        }
+        if let Some(rotation) = state.camera_rotation {
+            let mut persisted_rotation = Vector3::new(rotation[0], rotation[1], rotation[2]);
+            persisted_rotation.x = persisted_rotation
+                .x
+                .clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
+            persisted_rotation.y = persisted_rotation.y.rem_euclid(std::f64::consts::TAU);
+            persisted_rotation.z = persisted_rotation.z.rem_euclid(std::f64::consts::TAU);
+            self.camera.rotation = persisted_rotation;
+        }
         self.light_theta = state.light_theta.clamp(-1.57, 1.57);
         self.light_phi = state.light_phi.clamp(-std::f32::consts::PI, std::f32::consts::PI);
         self.advanced_window_open = state.advanced_window_open;
@@ -301,6 +314,16 @@ impl App {
             render_scale: self.render_scale,
             active_voxel_grids: self.voxel.manager.active_voxel_grids,
             camera_fov: self.camera.fov,
+            camera_position: Some([
+                self.camera.position.x,
+                self.camera.position.y,
+                self.camera.position.z,
+            ]),
+            camera_rotation: Some([
+                self.camera.rotation.x,
+                self.camera.rotation.y,
+                self.camera.rotation.z,
+            ]),
             mouse_sensitivity: self.camera.mouse_sensitivity,
             light_theta: self.light_theta,
             light_phi: self.light_phi,
